@@ -2541,13 +2541,47 @@ function reportSyncError(err, prefix){
   setSheetsMsg((prefix?prefix+': ':'') + msg, '#C62828');
 }
 
+function isLocalFileApp(){
+  return typeof location!=='undefined' && location.protocol==='file:';
+}
+
+function postSheetRequestBlind(payload){
+  if(!CFG.scriptUrl) throw new Error('Apps Script URL is missing.');
+  var body = JSON.stringify(payload);
+  var sent = false;
+  if(navigator.sendBeacon){
+    try {
+      var blob = new Blob([body], {type:'text/plain;charset=UTF-8'});
+      sent = navigator.sendBeacon(CFG.scriptUrl, blob);
+    } catch(e) {}
+  }
+  if(!sent){
+    fetch(CFG.scriptUrl, {
+      method:'POST',
+      mode:'no-cors',
+      headers:{'Content-Type':'text/plain;charset=UTF-8'},
+      body: body
+    }).catch(function(){});
+    sent = true;
+  }
+  setSyncState('online', 'Sync Sent');
+  setTimeout(function(){ setSyncState('configured'); }, 1600);
+  return { ok:true, blind:true };
+}
+
 async function postSheetRequest(payload){
   if(!CFG.scriptUrl) throw new Error('Apps Script URL is missing.');
-  var res = await fetch(CFG.scriptUrl, {
-    method:'POST',
-    headers:{'Content-Type':'application/json'},
-    body: JSON.stringify(payload)
-  });
+  var body = JSON.stringify(payload);
+  try {
+    var res = await fetch(CFG.scriptUrl, {
+      method:'POST',
+      headers:{'Content-Type':'text/plain;charset=UTF-8'},
+      body: body
+    });
+  } catch(fetchErr) {
+    if(isLocalFileApp()) return postSheetRequestBlind(payload);
+    throw fetchErr;
+  }
   var raw = await res.text();
   var data = null;
   try { data = raw ? JSON.parse(raw) : null; } catch(e) {}
@@ -2568,22 +2602,29 @@ async function testSheetsConnection(){
   }
   setSheetsMsg('Testing Google Sheets connection...', 'var(--amber)');
   try {
-    var res = await fetch(CFG.scriptUrl, {
-      method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({action:'ping'})
-    });
+    var testUrl = CFG.scriptUrl + (CFG.scriptUrl.indexOf('?')===-1 ? '?' : '&') + 'action=testDrive';
+    var res = await fetch(testUrl, { method:'GET' });
     var raw = await res.text();
     var data = null;
     try { data = raw ? JSON.parse(raw) : null; } catch(e) {}
-    if(res.ok && !(data && data.ok===false)){
+    if(res.ok && data && data.success){
       setSyncState('online');
-      setSheetsMsg('Connection successful. Google Sheets sync is reachable.', '#2E7D32');
+      setSheetsMsg('Connection successful. Apps Script and Drive folder are reachable.', '#2E7D32');
+      return;
+    }
+    if(isLocalFileApp()){
+      setSyncState('configured');
+      setSheetsMsg('Local file mode blocked direct reading of the response. The sync request format matches your Apps Script, so save a real record and confirm it appears in Sheets.', '#E65100');
       return;
     }
     setSyncState('configured');
-    setSheetsMsg('Script is reachable, but the test action was not accepted ('+extractSyncError(res, data)+'). Sync may still work if ping is not implemented in your Apps Script.', '#E65100');
+    setSheetsMsg('Connection test did not return the expected success response.', '#E65100');
   } catch(err) {
+    if(isLocalFileApp()){
+      setSyncState('configured');
+      setSheetsMsg('Local file mode blocked direct response reading. Save a real order/customer and confirm it appears in Sheets.', '#E65100');
+      return;
+    }
     reportSyncError(err, 'Connection failed');
   }
 }
