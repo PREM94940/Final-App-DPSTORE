@@ -2267,7 +2267,12 @@ textarea{resize:none;height:64px;}
   <div class="att-log-sheet">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;">
       <div style="font-size:15px;font-weight:800;" id="att-detail-title">Attendance Log</div>
-      <script>
+      <button class="detail-close" onclick="document.getElementById('att-log-detail-popup').classList.remove('open')" aria-label="Close">&#10005;</button>
+    </div>
+    <div id="att-detail-body"></div>
+  </div>
+</div>
+<script>
 //  CONFIG 
 let CFG = {
   sheetId:'', scriptUrl:'', waUrl:'', waToken:'', waSender:'',
@@ -2328,14 +2333,16 @@ const fmt=n=>''+Math.round(n||0).toLocaleString('en-IN');
 const uid=()=>Date.now().toString(36)+Math.random().toString(36).slice(2,5);
 
 //  AUTH 
-let selRole='admin';
+let _selRoleVal='admin';
+function selRole(r,el){selRole2(r,el);}
 function selRole2(r,el){
-  selRole=r;
+  _selRoleVal=r;
   document.querySelectorAll('.role-btn').forEach(b=>b.classList.remove('active'));
   el.classList.add('active');
   const h={admin:'admin / admin123',sales:'sales / sales123',tailor:'tailor / tailor123',manager:'manager / manager123'};
   document.getElementById('login-hint').textContent=h[r]||'';
 }
+window.selRole = selRole2; // ensure inline onclick finds it
 // fix name clash
 document.querySelectorAll('.role-btn').forEach((b,i)=>{
   const roles=['admin','sales','tailor','manager'];
@@ -2531,16 +2538,7 @@ async function uploadPhotoToDrive(base64, name) {
   } catch(e) { return null; }
 }
 
-async function updateSheetRow(sheet,matchCol,matchVal,updateCol,updateVal){
-  if(!CFG.scriptUrl)return;
-  try{
-    await fetch(CFG.scriptUrl+'?sheet='+sheet+'&action=update',{
-      method:'POST',mode:'no-cors',
-      headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({matchCol,matchVal,updateCol,updateVal})
-    });
-  }catch(e){}
-}
+
 
 //  SYNC FROM SHEET 
 async function syncFromSheet(){
@@ -3114,15 +3112,16 @@ async function saveOrder(){
     const p=document.getElementById('wa-order-prev');
     if(p){p.textContent=m;p.style.display='block';}
   }
-  // Sync to sheet
-  try{await syncToSheets('ORDERS', {
-      orderId:o.id, customer:name, phone:phone,
-      product:o.product, fabric:o.fabric, price:totalPrice, advance:adv,
-      orderDate:o.orderDate, deliveryDate:delivery, status:'New Order',
-      tailor:o.tailor, notes:o.notes,
-      referenceImage: (_photos.ref&&_photos.ref[0]) ? _photos.ref[0].substring(0,100)+'...' : '',
-      paymentScreenshot: (_photos.pay&&_photos.pay[0]) ? _photos.pay[0].substring(0,100)+'...' : ''
-    });}catch(e){}
+  // Upload photos to Drive, then sync order + auto-created customer
+  var _refUrl='',_payUrl='';
+  if(CFG.scriptUrl){
+    try{
+      if(refPhotos.length&&refPhotos[0]&&refPhotos[0].startsWith('data:')){var ru=await uploadPhotoToDrive(refPhotos[0],'ref_'+o.id+'.jpg');if(ru){_refUrl=ru;o.refPhotos[0]=ru;saveAll();}}
+      if(payPhotos.length&&payPhotos[0]&&payPhotos[0].startsWith('data:')){var pu=await uploadPhotoToDrive(payPhotos[0],'pay_'+o.id+'.jpg');if(pu){_payUrl=pu;o.payPhotos[0]=pu;saveAll();}}
+    }catch(e){}
+  }
+  try{await syncToSheets('ORDERS',{orderId:o.id,customer:name,phone:phone,product:o.product,fabric:o.fabric,price:totalPrice,advance:adv,orderDate:o.orderDate,deliveryDate:delivery,status:'New Order',tailor:o.tailor,notes:o.notes,referenceImage:_refUrl,paymentScreenshot:_payUrl});}catch(e){}
+  try{if(c&&!c._synced){await syncToSheets('CUSTOMERS',{customerId:c.id,name:c.name,phone:c.phone,city:c.city||'Warangal',type:c.type||'Regular',bust:'',waist:'',hip:'',shoulder:'',sleeve:'',length:'',address:'',notes:''});c._synced=true;saveAll();}}catch(e){}
 
   showMsg('order-msg','Order '+id+' saved!','#2E7D32');
 
@@ -3318,7 +3317,11 @@ async function saveExp(){
   if(!amt){showMsg('exp-msg','Enter amount.','#C62828');return;}
   const ex={id:uid(),cat:document.getElementById('ex-cat').value,amount:amt,date:document.getElementById('ex-date').value||today(),note:document.getElementById('ex-note').value};
   expenses.unshift(ex);saveAll();
-  await syncToSheets('EXPENSES', {expenseId:ex.id, category:ex.cat, amount:ex.amount, date:ex.date, note:ex.note, billImage:(_photos.exp&&_photos.exp[0])||''});
+  await (async function(){
+    var _bUrl='';
+    if(typeof _photos!=='undefined'&&_photos.exp&&_photos.exp[0]&&_photos.exp[0].startsWith('data:')&&CFG.scriptUrl){try{var u=await uploadPhotoToDrive(_photos.exp[0],'exp_'+ex.id+'.jpg');if(u)_bUrl=u;}catch(e){}}
+    try{await syncToSheets('EXPENSES',{expenseId:ex.id,category:ex.cat,amount:ex.amount,date:ex.date,note:ex.note||'',billImage:_bUrl});}catch(e){}
+  })();
   showMsg('exp-msg',' Expense saved!','#2E7D32');
   document.getElementById('ex-amt').value='';document.getElementById('ex-note').value='';
   setTimeout(()=>{var mOe=document.getElementById('m-expense');if(mOe)mOe.classList.remove('open');renderExpenses();renderDashboard();document.getElementById('exp-msg').textContent='';},1200);
@@ -3573,16 +3576,28 @@ function dlTemplate(type){
   const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([t[type]],{type:'text/csv'}));a.download='deeprastore_'+type+'_template.csv';a.click();
 }
 function trigImport(type){const i=document.createElement('input');i.type='file';i.accept='.csv';i.onchange=e=>parseCSV(e.target.files[0],type);i.click();}
+function parseCSVRow(row) {
+  // Proper CSV parser respecting quoted fields
+  var result=[], cur='', inQ=false;
+  for(var i=0;i<row.length;i++){
+    var ch=row[i];
+    if(ch==='"'){ if(inQ&&row[i+1]==='"'){cur+='"';i++;}else inQ=!inQ; }
+    else if(ch===','&&!inQ){ result.push(cur.trim()); cur=''; }
+    else cur+=ch;
+  }
+  result.push(cur.trim());
+  return result;
+}
+
 function parseCSV(file,type){
   if(!file)return;
   const r=new FileReader();
   r.onload=function(e){
     const lines=e.target.result.split('\n').filter(l=>l.trim());
-    const headers=lines[0].split(',').map(h=>h.replace(/"/g,'').trim().toLowerCase());
+    const headers=parseCSVRow(lines[0]).map(h=>h.toLowerCase());
     let imported=0;
     lines.slice(1).forEach(row=>{
-      const cols=row.match(/(".*?"|[^,]+)/g)||row.split(',');
-      const clean=cols.map(c=>c.replace(/^"|"$/g,'').trim());
+      const clean=parseCSVRow(row);
       const obj={};headers.forEach((h,i)=>obj[h]=clean[i]||'');
       if(type==='customers'&&obj.phone&&obj.name&&!customers.find(c=>c.phone===obj.phone)){customers.push({id:'C'+uid(),name:obj.name||obj['customer name']||'',phone:obj.phone||'',city:obj.city||'Warangal',type:obj.type||'Regular',addr:obj.address||'',measurements:{shoulder:obj.shoulder||'',bust:obj.bust||'',waist:obj.waist||'',hip:obj.hip||'',sleeve:obj.sleeve||'',length:obj.length||''},notes:obj.notes||'',orders:parseInt(obj.orders)||0,spend:parseFloat(obj.spend)||0,lastOrder:''});imported++;}
       if(type==='orders'&&obj.product){orders.push({id:obj['order id']||'ORD'+uid(),custId:'',custName:obj.customer||'',phone:obj.phone||'',product:obj.product||'',fabric:obj.fabric||'',price:parseFloat(obj.price)||0,advance:parseFloat(obj.advance)||0,orderDate:obj['order date']||today(),deliveryDate:obj['delivery date']||'',status:obj.status||'New Order',tailor:obj.tailor||'',notes:obj.notes||''});imported++;}
@@ -3848,7 +3863,11 @@ function saveInv(){
   if(typeof _saveInv==='function') _saveInv();
   showMsg('inv-msg','Product saved!','#2E7D32');
   // Sync: send code (DP126) not internal id
-  try{syncToSheets('INVENTORY', {productCode:item.code||'', productName:item.nm, category:item.cat, status:item.st, quantity:item.qt, sellingPrice:item.sl, costPrice:item.cs, sizeColor:item.sz||'', fabric:item.fb||'', addedDate:item.ad, imageUrls:item.ph||''});}catch(e){}
+  (async function(){
+    var _photoUrl='';
+    if(photo&&photo.startsWith('data:')&&CFG.scriptUrl){try{var u=await uploadPhotoToDrive(photo,'inv_'+item.code+'_'+Date.now()+'.jpg');if(u){_photoUrl=u;item.ph=u;if(typeof _saveInv==='function')_saveInv();}}catch(e){}}
+    try{await syncToSheets('INVENTORY',{productCode:item.code,productName:item.nm,category:item.cat,status:item.st,quantity:item.qt,sellingPrice:item.sl,costPrice:item.cs,sizeColor:item.sz||'',fabric:item.fb||'',addedDate:item.ad,imageUrls:_photoUrl||photo||''});}catch(e){}
+  })();
   // Reset form
   ['inv-nm','inv-cs','inv-sl','inv-qt','inv-sz','inv-nt','inv-code'].forEach(function(id){var e=document.getElementById(id);if(e)e.value='';});
   if(typeof _photos!=='undefined'&&_photos.inv) _photos.inv=[];
@@ -7163,8 +7182,10 @@ var _ordersPerPage = 10;
 
 function setOrdersView(v,el){
   localStorage.setItem('ord_view',v);
-  document.querySelectorAll('.view-btn').forEach(b=>b.classList.remove('active'));
-  if(el) el.classList.add('active');
+  document.querySelectorAll('#screen-orders .view-btn').forEach(function(b){
+    b.style.background='var(--card)';b.style.color='var(--text)';b.style.border='1.5px solid var(--border)';
+  });
+  if(el){el.style.background='var(--purple)';el.style.color='#fff';el.style.border='1.5px solid var(--purple)';}
   renderOrders();
 }
 
@@ -7731,12 +7752,25 @@ openModal=function(id){
   _omBase2(id);
   if(id==='m-order'){
     _orderItems=[];
-    initOrderItems();
-    var adv=document.getElementById('o-advance'); if(adv) adv.value='';
-    updateOrderTotals();
+    if(typeof _photos!=='undefined'){_photos.ref=[];_photos.pay=[];}
+    ['prev-ref','prev-pay'].forEach(function(pid){var e=document.getElementById(pid);if(e)e.innerHTML='';});
+    ['o-name','o-phone','o-advance','o-notes'].forEach(function(fid){var e=document.getElementById(fid);if(e)e.value='';});
+    var _is=document.getElementById('o-inv-selected');if(_is){_is.style.display='none';_is.innerHTML='';}
+    var _iq=document.getElementById('o-inv-search');if(_iq)_iq.value='';
+    var _wp=document.getElementById('wa-order-prev');if(_wp)_wp.style.display='none';
+    initOrderItems(); updateOrderTotals();
     setTimeout(function(){ _initPhotoInputs(); },100);
   }
-  if(id==='m-inv'||id==='m-expense'){
+  if(id==='m-inv'){
+    if(typeof _photos!=='undefined') _photos.inv=[];
+    var _pi=document.getElementById('prev-inv');if(_pi)_pi.innerHTML='';
+    ['inv-nm','inv-code','inv-cs','inv-sl','inv-sz','inv-nt'].forEach(function(x){var e=document.getElementById(x);if(e)e.value='';});
+    var _iq2=document.getElementById('inv-qt');if(_iq2)_iq2.value='1';
+    setTimeout(function(){ _initPhotoInputs(); },100);
+  }
+  if(id==='m-expense'){
+    if(typeof _photos!=='undefined') _photos.exp=[];
+    var _pe=document.getElementById('prev-exp');if(_pe)_pe.innerHTML='';
     setTimeout(function(){ _initPhotoInputs(); },100);
   }
 };
