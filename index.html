@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -1394,7 +1394,11 @@ textarea{resize:none;height:64px;}
             <label class="f-label">Apps Script Web App URL</label>
             <input type="text" id="cfg-script-url" placeholder="https://script.google.com/macros/s/...">
           </div>
-          <button class="btn btn-purple" onclick="saveCfgSheets()">Save & Connect</button>
+          <div class="btn-row">
+            <button class="btn btn-purple" onclick="saveCfgSheets()">Save Settings</button>
+            <button class="btn btn-blue" onclick="testSheetsConnection()">Test Connection</button>
+          </div>
+          <div style="font-size:10px;color:var(--muted);margin-top:8px;">Save first, then use Test Connection to confirm your Apps Script responds correctly.</div>
           <div class="save-msg" id="cfg-sheets-msg"></div>
         </div>
         <div class="form-card">
@@ -2353,13 +2357,15 @@ function loadAll(){
   expenses=DB.g('expenses'); bills=DB.g('bills'); tailors=DB.g('tailors'); staff=DB.g('staff');
   attendance=DB.g('attendance'); advances=DB.g('advances');
   const c=DB.g('config'); if(c&&c[0]) CFG={...CFG,...c[0]};
+  sanitizeAppData();
   if(!orders.length&&!customers.length) initFresh();
 }
 function saveAll(){
+  sanitizeAppData();
   DB.s('orders',orders); DB.s('customers',customers); DB.s('stock',stock);
   DB.s('expenses',expenses); DB.s('bills',bills); DB.s('tailors',tailors); DB.s('staff',staff);
 }
-function saveAtt2(){ DB.s('attendance',attendance); DB.s('advances',advances); }
+function saveAtt2(){ sanitizeAppData(); DB.s('attendance',attendance); DB.s('advances',advances); }
 function saveCfg(){ DB.s('config',[CFG]); }
 
 function initFresh(){
@@ -2507,8 +2513,79 @@ document.addEventListener('click',function(e){
 //  SYNC 
 function checkSync(){
   const ok=!!CFG.scriptUrl;
-  document.getElementById('sync-dot').className='sync-dot'+(ok?'':' off');
-  document.getElementById('sync-label').textContent=ok?'Synced':'Offline';
+  setSyncState(ok?'configured':'offline');
+}
+
+function setSyncState(state, label){
+  var dot = document.getElementById('sync-dot');
+  var text = document.getElementById('sync-label');
+  if(dot) dot.className='sync-dot'+((state==='offline'||state==='error')?' off':'');
+  if(text) text.textContent = label || (state==='online'?'Online':state==='configured'?'Configured':state==='error'?'Sync Error':'Offline');
+}
+
+function setSheetsMsg(msg, color){
+  var el = document.getElementById('cfg-sheets-msg');
+  if(!el) return;
+  el.textContent = msg || '';
+  el.style.color = color || 'var(--muted)';
+}
+
+function extractSyncError(res, data){
+  if(data && (data.error || data.message)) return data.error || data.message;
+  return 'HTTP ' + res.status;
+}
+
+function reportSyncError(err, prefix){
+  var msg = (err && err.message) ? err.message : String(err || 'Unknown error');
+  setSyncState('error');
+  setSheetsMsg((prefix?prefix+': ':'') + msg, '#C62828');
+}
+
+async function postSheetRequest(payload){
+  if(!CFG.scriptUrl) throw new Error('Apps Script URL is missing.');
+  var res = await fetch(CFG.scriptUrl, {
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body: JSON.stringify(payload)
+  });
+  var raw = await res.text();
+  var data = null;
+  try { data = raw ? JSON.parse(raw) : null; } catch(e) {}
+  if(!res.ok) throw new Error(extractSyncError(res, data));
+  if(data && data.ok===false) throw new Error(data.error || data.message || 'Apps Script returned an error.');
+  setSyncState('online');
+  return data || raw;
+}
+
+async function testSheetsConnection(){
+  CFG.sheetId=document.getElementById('cfg-sheet-id').value.trim();
+  CFG.scriptUrl=document.getElementById('cfg-script-url').value.trim();
+  saveCfg();
+  checkSync();
+  if(!CFG.scriptUrl){
+    setSheetsMsg('Enter the Apps Script Web App URL first.', '#C62828');
+    return;
+  }
+  setSheetsMsg('Testing Google Sheets connection...', 'var(--amber)');
+  try {
+    var res = await fetch(CFG.scriptUrl, {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({action:'ping'})
+    });
+    var raw = await res.text();
+    var data = null;
+    try { data = raw ? JSON.parse(raw) : null; } catch(e) {}
+    if(res.ok && !(data && data.ok===false)){
+      setSyncState('online');
+      setSheetsMsg('Connection successful. Google Sheets sync is reachable.', '#2E7D32');
+      return;
+    }
+    setSyncState('configured');
+    setSheetsMsg('Script is reachable, but the test action was not accepted ('+extractSyncError(res, data)+'). Sync may still work if ping is not implemented in your Apps Script.', '#E65100');
+  } catch(err) {
+    reportSyncError(err, 'Connection failed');
+  }
 }
 
 //  Core sync: POST {action, ...data} to Apps Script 
@@ -2526,12 +2603,11 @@ async function syncToSheets(sheet, data, _unused) {
     ? { action:'append', sheet:sheet, row: Array.isArray(data) ? data : Object.values(data) }
     : { action:action, ...( Array.isArray(data) ? _mapRow(sheet, data) : data ) };
   try {
-    await fetch(CFG.scriptUrl, {
-      method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body: JSON.stringify(payload)
-    });
-  } catch(e) {}
+    await postSheetRequest(payload);
+  } catch(e) {
+    reportSyncError(e, 'Sync failed');
+    throw e;
+  }
 }
 
 // Map legacy array calls to named fields
@@ -2556,12 +2632,11 @@ function _mapRow(sheet, row) {
 async function updateSheetRow(sheet, matchCol, matchVal, updateCol, updateVal) {
   if(!CFG.scriptUrl) return;
   try {
-    await fetch(CFG.scriptUrl, {
-      method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({ action:'update', sheet:sheet, matchCol:matchCol, matchVal:matchVal, updateCol:updateCol, updateVal:updateVal })
-    });
-  } catch(e) {}
+    await postSheetRequest({ action:'update', sheet:sheet, matchCol:matchCol, matchVal:matchVal, updateCol:updateCol, updateVal:updateVal });
+  } catch(e) {
+    reportSyncError(e, 'Status update failed');
+    throw e;
+  }
 }
 
 // Upload photo to Drive and return URL
@@ -2790,8 +2865,7 @@ async function syncAllFromSheet() {
       if(id==='inventory') renderInventory();
     }
     // Show sync indicator
-    var sl = document.getElementById('sync-label');
-    if(sl) { sl.textContent='Synced'; setTimeout(function(){ sl.textContent='Online'; },2000); }
+    setSyncState('online');
   }
 }
 
@@ -3611,8 +3685,7 @@ function saveCfgSheets(){
   CFG.sheetId=document.getElementById('cfg-sheet-id').value.trim();
   CFG.scriptUrl=document.getElementById('cfg-script-url').value.trim();
   saveCfg();checkSync();
-  showMsg('cfg-sheets-msg',CFG.scriptUrl?' Connected! Sync is active.':' Saved (add Script URL to enable sync)','#2E7D32');
-  setTimeout(()=>document.getElementById('cfg-sheets-msg').textContent='',3000);
+  setSheetsMsg(CFG.scriptUrl?'Settings saved. Use Test Connection to verify sync.':'Saved. Add the Apps Script URL to enable sync.', CFG.scriptUrl?'#2E7D32':'var(--muted)');
 }
 function saveCfgWA(){
   CFG.waUrl=document.getElementById('cfg-wa-url').value.trim();
