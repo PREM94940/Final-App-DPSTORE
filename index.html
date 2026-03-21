@@ -2464,15 +2464,71 @@ function checkSync(){
   document.getElementById('sync-label').textContent=ok?'Synced':'Offline';
 }
 
-async function syncToSheets(sheet,data,action='append'){
-  if(!CFG.scriptUrl)return;
-  try{
-    await fetch(CFG.scriptUrl+'?sheet='+sheet+'&action='+action,{
-      method:'POST',mode:'no-cors',
+//  Core sync: POST {action, ...data} to Apps Script 
+async function syncToSheets(sheet, data, _unused) {
+  if(!CFG.scriptUrl) return;
+  // Map sheet name to action name
+  const actionMap = {
+    'ORDERS':'saveOrder','CUSTOMERS':'saveCustomer','STOCK':'saveStock',
+    'EXPENSES':'saveExpense','PAYMENTS':'savePayment','INVENTORY':'saveInventory',
+    'RETURNS':'saveReturn','TAILORS':'saveTailor','STAFF':'saveStaff',
+    'ATTENDANCE':'saveAttendance','ADVANCES':'saveAdvance'
+  };
+  const action = actionMap[sheet] || 'append';
+  const payload = (action === 'append')
+    ? { action:'append', sheet:sheet, row: Array.isArray(data) ? data : Object.values(data) }
+    : { action:action, ...( Array.isArray(data) ? _mapRow(sheet, data) : data ) };
+  try {
+    await fetch(CFG.scriptUrl, {
+      method:'POST', mode:'no-cors',
       headers:{'Content-Type':'application/json'},
-      body:JSON.stringify(data)
+      body: JSON.stringify(payload)
     });
-  }catch(e){}
+  } catch(e) {}
+}
+
+// Map legacy array calls to named fields
+function _mapRow(sheet, row) {
+  const maps = {
+    'ORDERS':      ['orderId','customer','phone','product','fabric','price','advance','orderDate','deliveryDate','status','tailor','notes','referenceImage','paymentScreenshot'],
+    'CUSTOMERS':   ['customerId','name','phone','city','type','bust','waist','hip','shoulder','sleeve','length','address','notes'],
+    'STOCK':       ['stockId','name','category','color','qty','cost','supplier','date'],
+    'EXPENSES':    ['expenseId','category','amount','date','note','billImage'],
+    'PAYMENTS':    ['billId','orderId','customer','total','advance','collected','method','date','screenshot'],
+    'INVENTORY':   ['productCode','productName','category','status','quantity','sellingPrice','costPrice','sizeColor','fabric','addedDate','imageUrls'],
+    'ATTENDANCE':  ['empId','date','inTime','outTime','totalHours','normalHours','otHours'],
+    'ADVANCES':    ['empId','name','amount','date','reason'],
+  };
+  const keys = maps[sheet] || [];
+  const obj = {};
+  keys.forEach((k,i) => { if(row[i] !== undefined) obj[k] = row[i]; });
+  return obj;
+}
+
+// Update a row in sheet (e.g. status change)
+async function updateSheetRow(sheet, matchCol, matchVal, updateCol, updateVal) {
+  if(!CFG.scriptUrl) return;
+  try {
+    await fetch(CFG.scriptUrl, {
+      method:'POST', mode:'no-cors',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ action:'update', sheet:sheet, matchCol:matchCol, matchVal:matchVal, updateCol:updateCol, updateVal:updateVal })
+    });
+  } catch(e) {}
+}
+
+// Upload photo to Drive and return URL
+async function uploadPhotoToDrive(base64, name) {
+  if(!CFG.scriptUrl || !base64) return null;
+  try {
+    const r = await fetch(CFG.scriptUrl, {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ action:'uploadPhoto', base64:base64, name: name||('photo_'+Date.now()+'.jpg') })
+    });
+    const d = await r.json();
+    return (d && d.url) ? d.url : null;
+  } catch(e) { return null; }
 }
 
 async function updateSheetRow(sheet,matchCol,matchVal,updateCol,updateVal){
@@ -3059,7 +3115,14 @@ async function saveOrder(){
     if(p){p.textContent=m;p.style.display='block';}
   }
   // Sync to sheet
-  try{await syncToSheets('ORDERS',[id,name,phone,o.product,o.fabric,totalPrice,adv,o.orderDate,delivery,'New Order',o.tailor,o.notes]);}catch(e){}
+  try{await syncToSheets('ORDERS', {
+      orderId:o.id, customer:name, phone:phone,
+      product:o.product, fabric:o.fabric, price:totalPrice, advance:adv,
+      orderDate:o.orderDate, deliveryDate:delivery, status:'New Order',
+      tailor:o.tailor, notes:o.notes,
+      referenceImage: (_photos.ref&&_photos.ref[0]) ? _photos.ref[0].substring(0,100)+'...' : '',
+      paymentScreenshot: (_photos.pay&&_photos.pay[0]) ? _photos.pay[0].substring(0,100)+'...' : ''
+    });}catch(e){}
 
   showMsg('order-msg','Order '+id+' saved!','#2E7D32');
 
@@ -3144,7 +3207,12 @@ async function saveCust(){
   }
   const c={id:'C'+uid(),name,phone,city:document.getElementById('c-city').value||'Warangal',type:document.getElementById('c-type').value,addr:document.getElementById('c-addr').value,measurements:{shoulder:document.getElementById('m-s').value,bust:document.getElementById('m-b').value,waist:document.getElementById('m-w').value,hip:document.getElementById('m-h').value,sleeve:document.getElementById('m-sl').value,length:document.getElementById('m-l').value},notes:document.getElementById('c-notes').value,orders:0,spend:0,lastOrder:''};
   customers.push(c);saveAll();
-  await syncToSheets('CUSTOMERS',[c.id,name,phone,c.city,c.type,c.measurements.bust,c.measurements.waist,c.measurements.hip]);
+  await syncToSheets('CUSTOMERS', {
+      customerId:c.id, name:c.name, phone:c.phone, city:c.city, type:c.type,
+      bust:c.measurements.bust||'', waist:c.measurements.waist||'', hip:c.measurements.hip||'',
+      shoulder:c.measurements.shoulder||'', sleeve:c.measurements.sleeve||'', length:c.measurements.length||'',
+      address:c.addr||'', notes:c.notes||''
+    });
   showMsg('cust-msg',' Customer saved!','#2E7D32');
   ['c-name','c-phone','c-addr','m-s','m-b','m-w','m-h','m-sl','m-l','c-notes'].forEach(i=>{const el=document.getElementById(i);if(el)el.value='';});
   setTimeout(()=>{var _mc=document.getElementById('m-customer');if(_mc)_mc.classList.remove('open');renderCustomers();renderDashboard();document.getElementById('cust-msg').textContent='';},1200);
@@ -3171,7 +3239,7 @@ async function saveStock(){
   if(!name){showMsg('stock-msg','Fabric name required.','#C62828');return;}
   const s={id:'S'+uid(),name,cat:document.getElementById('st-cat').value,color:document.getElementById('st-color').value,qty,cost:parseFloat(document.getElementById('st-cost').value)||0,supplier:document.getElementById('st-supp').value,date:today()};
   stock.unshift(s);saveAll();
-  await syncToSheets('STOCK',[s.id,s.name,s.cat,s.color,s.qty,s.cost,s.supplier,s.date]);
+  await syncToSheets('STOCK', {stockId:s.id, name:s.name, category:s.cat, color:s.color, qty:s.qty, cost:s.cost, supplier:s.supplier, date:s.date});
   showMsg('stock-msg',' Stock saved!','#2E7D32');
   ['st-name','st-color','st-qty','st-cost','st-supp'].forEach(i=>{const el=document.getElementById(i);if(el)el.value='';});
   setTimeout(()=>{var mOs=document.getElementById('m-stock');if(mOs)mOs.classList.remove('open');renderStock();document.getElementById('stock-msg').textContent='';},1200);
@@ -3200,7 +3268,7 @@ async function genBill(){
   bills.push(b);o.status='Delivered';saveAll();
   const m=waMsg('delivered',{name:o.custName,product:o.product});
   if(CFG.waUrl&&o.phone)await sendWA(o.phone,m);
-  await syncToSheets('PAYMENTS',[b.id,b.orderId,b.customer,b.amount,b.advance,b.collected,b.method,b.date]);
+  await syncToSheets('PAYMENTS', {billId:b.id, orderId:b.orderId, customer:b.customer, total:b.amount, advance:b.advance, collected:b.collected, method:b.method, date:b.date, screenshot:''});
   showMsg('bill-msg',' Bill done! Marked Delivered. WhatsApp sent!','#2E7D32');
   document.getElementById('bill-preview').style.display='none';
   setTimeout(()=>{populateBillOrds();renderBills();renderDashboard();document.getElementById('bill-msg').textContent='';},1800);
@@ -3250,7 +3318,7 @@ async function saveExp(){
   if(!amt){showMsg('exp-msg','Enter amount.','#C62828');return;}
   const ex={id:uid(),cat:document.getElementById('ex-cat').value,amount:amt,date:document.getElementById('ex-date').value||today(),note:document.getElementById('ex-note').value};
   expenses.unshift(ex);saveAll();
-  await syncToSheets('EXPENSES',[ex.id,ex.cat,ex.amount,ex.date,ex.note]);
+  await syncToSheets('EXPENSES', {expenseId:ex.id, category:ex.cat, amount:ex.amount, date:ex.date, note:ex.note, billImage:(_photos.exp&&_photos.exp[0])||''});
   showMsg('exp-msg',' Expense saved!','#2E7D32');
   document.getElementById('ex-amt').value='';document.getElementById('ex-note').value='';
   setTimeout(()=>{var mOe=document.getElementById('m-expense');if(mOe)mOe.classList.remove('open');renderExpenses();renderDashboard();document.getElementById('exp-msg').textContent='';},1200);
@@ -3338,7 +3406,7 @@ function saveAtt(){
     }
   }
   saveAtt2();
-  syncToSheets('ATTENDANCE',[empId,t,rec.inTime,rec.outTime,(rec.totalHours||0).toFixed(2),(rec.normalHours||0).toFixed(2),(rec.otHours||0).toFixed(2)],'append');
+  syncToSheets('ATTENDANCE', {empId:empId, date:t, inTime:rec.inTime, outTime:rec.outTime, totalHours:(rec.totalHours||0).toFixed(2), normalHours:(rec.normalHours||0).toFixed(2), otHours:(rec.otHours||0).toFixed(2)});
   const emp=EMPS.find(e=>e.id===empId);
   showMsg('att-msg',' '+emp.name+' '+(type==='in'?'checked in':'checked out')+' at '+now,'#2E7D32');
   document.getElementById('att-time').value='';
@@ -3417,7 +3485,7 @@ function saveAdv(){
   const emp=EMPS.find(e=>e.id===empId);
   advances.push({id:uid(),empId,name:emp?emp.name:'',amount:amt,date:today(),reason});
   saveAtt2();
-  syncToSheets('ADVANCES',[empId,emp?emp.name:'',amt,today(),reason]);
+  syncToSheets('ADVANCES', {empId:empId, name:emp?emp.name:'', amount:amt, date:today(), reason:reason});
   showMsg('adv-msg',' Advance saved for '+emp.name,'#2E7D32');
   document.getElementById('adv-amt').value='';document.getElementById('adv-reason').value='';
   setTimeout(()=>{document.getElementById('adv-msg').textContent='';renderSalary();},1500);
@@ -3564,27 +3632,26 @@ function _viewImg(src) {
 
 
 // ===== DRIVE PHOTO UPLOAD =====
-function _uploadToDrive(src, key, inputId, previewId, photoIdx){
-  if(!CFG||!CFG.scriptUrl) return;
-  var folderMap={ref:'Orders',pay:'Payments',exp:'Expenses',inv:'Inventory'};
-  var folder=folderMap[key]||'General';
-  var fname=key+'_'+Date.now()+'.jpg';
-  fetch(CFG.scriptUrl,{
-    method:'POST',
-    headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({action:'uploadPhoto',base64:src,folder:folder,name:fname,sheet:'PHOTOS'})
-  }).then(function(r){return r.json();}).then(function(d){
-    if(d&&d.url&&typeof _photos!=='undefined'&&_photos[key]&&photoIdx<_photos[key].length){
-      _photos[key][photoIdx]=d.url;
-      // Update thumbnail src to Drive URL
-      var prev=document.getElementById(previewId);
-      if(prev){
-        var imgs=prev.querySelectorAll('img.photo-th');
-        if(imgs[photoIdx]){imgs[photoIdx].src=d.url;imgs[photoIdx].onclick=function(){_viewImg(d.url);};}
+function _uploadToDrive(src, key, inputId, previewId, photoIdx) {
+  if(!CFG.scriptUrl || !src) return;
+  uploadPhotoToDrive(src, key+'_'+Date.now()+'.jpg').then(function(url) {
+    if(!url) return;
+    // Update stored photo with Drive URL
+    if(typeof _photos!=='undefined' && _photos[key]) {
+      _photos[key][photoIdx] = url;
+      // Update thumbnail to show Drive URL
+      var prev = document.getElementById(previewId);
+      if(prev) {
+        var imgs = prev.querySelectorAll('img');
+        if(imgs[photoIdx]) imgs[photoIdx].src = url;
       }
-      var inp=document.getElementById(inputId);
-      var box=inp&&inp.closest?inp.closest('.photo-box'):null;
-      if(box){var l=box.querySelector('.photo-box-lbl');if(l)l.textContent='Saved to Drive!';}
+      // Show "Saved to Drive" indicator
+      var box = document.getElementById(inputId);
+      if(box) {
+        var lbl = box.closest ? box.closest('.photo-box') : null;
+        if(!lbl) { var p=box.parentNode; while(p&&!p.classList.contains('photo-box'))p=p.parentNode; lbl=p; }
+        if(lbl) { var l=lbl.querySelector('.photo-box-lbl'); if(l) l.textContent='Saved to Drive!'; }
+      }
     }
   }).catch(function(){});
 }
@@ -3781,7 +3848,7 @@ function saveInv(){
   if(typeof _saveInv==='function') _saveInv();
   showMsg('inv-msg','Product saved!','#2E7D32');
   // Sync: send code (DP126) not internal id
-  try{syncToSheets('INVENTORY',[item.code,item.nm,item.cat,item.st,item.qt,item.sl,item.cs,item.sz,item.fb,item.ad]);}catch(e){}
+  try{syncToSheets('INVENTORY', {productCode:item.code||'', productName:item.nm, category:item.cat, status:item.st, quantity:item.qt, sellingPrice:item.sl, costPrice:item.cs, sizeColor:item.sz||'', fabric:item.fb||'', addedDate:item.ad, imageUrls:item.ph||''});}catch(e){}
   // Reset form
   ['inv-nm','inv-cs','inv-sl','inv-qt','inv-sz','inv-nt','inv-code'].forEach(function(id){var e=document.getElementById(id);if(e)e.value='';});
   if(typeof _photos!=='undefined'&&_photos.inv) _photos.inv=[];
