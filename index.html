@@ -2686,10 +2686,12 @@ async function uploadPhotoToDrive(base64, name) {
   try {
     const r = await fetch(CFG.scriptUrl, {
       method:'POST',
-      headers:{'Content-Type':'application/json'},
+      headers:{'Content-Type':'text/plain;charset=UTF-8'},
       body: JSON.stringify({ action:'uploadPhoto', base64:base64, name: name||('photo_'+Date.now()+'.jpg') })
     });
-    const d = await r.json();
+    const raw = await r.text();
+    let d = null;
+    try { d = raw ? JSON.parse(raw) : null; } catch(e) {}
     return (d && d.url) ? d.url : null;
   } catch(e) { return null; }
 }
@@ -5458,49 +5460,15 @@ loginAs = function(u) {
 // Patch saveOrder for multi-product
 var _origSaveOrder2 = saveOrder;
 saveOrder = async function() {
-  var name  = document.getElementById('o-name').value.trim();
-  var phone = document.getElementById('o-phone').value.trim();
-  if (!name) { showMsg('order-msg','Customer name required.','#C62828'); return; }
-  if (_orderItems.length === 0 || !_orderItems.some(function(it){ return it.price>0; })) {
-    showMsg('order-msg','Add at least one item with a price.','#C62828'); return;
+  if (typeof _orderItems !== 'undefined' && (_orderItems.length === 0 || !_orderItems.some(function(it){ return (parseFloat(it.price)||0) > 0; }))) {
+    showMsg('order-msg','Add at least one item with a price.','#C62828');
+    return;
   }
-  var total = _orderItems.reduce(function(s,it){ return s+(it.price*(it.qty||1)); }, 0);
-  var adv   = parseFloat(document.getElementById('o-advance').value)||0;
-  var delivery = document.getElementById('o-delivery').value;
-  var id = 'ORD'+String(orders.length+1).padStart(3,'0');
-  // Build combined product/fabric string for backward compat
-  var prodStr  = _orderItems.map(function(it){ return (it.qty>1?it.qty+'x ':'')+it.product; }).join(', ');
-  var fabStr   = [...new Set(_orderItems.map(function(it){ return it.fabric; }))].join(', ');
-  var o = {
-    id: id, custId:'', custName:name, phone:phone,
-    product: prodStr, fabric: fabStr,
-    items: JSON.parse(JSON.stringify(_orderItems)),  // store full items
-    price: total, advance: adv,
-    orderDate: document.getElementById('o-date').value||today(),
-    deliveryDate: delivery,
-    status:'New Order',
-    tailor: document.getElementById('o-tailor').value,
-    notes: document.getElementById('o-notes').value,
-    refPhotos: _photos.ref.slice(),
-    payPhotos:  _photos.pay.slice()
-  };
-  orders.unshift(o);
-  var c = customers.find(function(x){ return x.phone===phone; });
-  if (!c) { c={id:'C'+uid(),name,phone,city:CFG.storeCity||'Warangal',type:'Regular',addr:'',measurements:{},notes:'',orders:0,spend:0,lastOrder:today()}; customers.push(c); }
-  c.orders=(c.orders||0)+1; c.spend=(c.spend||0)+total; c.lastOrder=today(); o.custId=c.id;
-  saveAll();
-  _resetPhoto('ref','prev-ref','inp-ref','Tap to add design or product reference image');
-  _resetPhoto('pay','prev-pay','inp-pay','Tap to add payment screenshot');
-  if(CFG.waUrl&&CFG.togOrder){
-    var m=waMsg('confirmed',{name,product:prodStr,delivery,price:fmt(total),advance:fmt(adv)});
-    await sendWA(phone,m);
-    var p=document.getElementById('wa-order-prev'); p.textContent=m; p.style.display='block';
-  }
-  await syncToSheets('ORDERS',[id,name,phone,prodStr,fabStr,total,adv,o.orderDate,delivery,'New Order']);
-  showMsg('order-msg',' Order '+id+' saved! ('+_orderItems.length+' item'+(_orderItems.length>1?'s':'')+')'+(CFG.waUrl?'  WhatsApp sent!':''),'#2E7D32');
-  _orderItems=[];
-  ['o-name','o-phone','o-advance','o-notes'].forEach(function(i){ var el=document.getElementById(i); if(el) el.value=''; });
-  setTimeout(function(){ var mOo=document.getElementById('m-order');if(mOo)mOo.classList.remove('open'); renderDashboard(); renderOrders(); populateBillOrds(); document.getElementById('order-msg').textContent=''; document.getElementById('wa-order-prev').style.display='none'; }, 2000);
+  await _origSaveOrder2();
+  populateBillOrds();
+  if (typeof populateReturnOrders === 'function') populateReturnOrders();
+  if (typeof populatePaymentOrders === 'function') populatePaymentOrders();
+  if (typeof populateFBDrops === 'function') populateFBDrops();
 };
 
 // ---------------------------------------------------------------
@@ -7836,9 +7804,9 @@ function editInvItem(id){
         if(p) p.innerHTML='<img class="photo-th" src="'+src+'">';
         if(lbl) lbl.textContent='New photo ready';
         if(CFG&&CFG.scriptUrl){
-          fetch(CFG.scriptUrl,{method:'POST',headers:{'Content-Type':'application/json'},
-            body:JSON.stringify({action:'uploadPhoto',base64:src,folder:'Inventory',name:'inv_'+Date.now()+'.jpg',sheet:'PHOTOS'})
-          }).then(function(r){return r.json();}).then(function(d){if(d&&d.url){_editInvNewPhoto=d.url;if(lbl)lbl.textContent='Saved to Drive!';}}).catch(function(){});
+          uploadPhotoToDrive(src,'inv_'+Date.now()+'.jpg').then(function(url){
+            if(url){_editInvNewPhoto=url;if(lbl)lbl.textContent='Saved to Drive!';}
+          }).catch(function(){});
         }
       };
       reader.readAsDataURL(this.files[0]); this.value='';
@@ -7954,6 +7922,22 @@ openModal=function(id){
     if(typeof _photos!=='undefined') _photos.exp=[];
     var _pe=document.getElementById('prev-exp');if(_pe)_pe.innerHTML='';
     setTimeout(function(){ _initPhotoInputs(); },100);
+  }
+  if(id==='m-return'){
+    if(typeof populateReturnOrders==='function') populateReturnOrders();
+    var _rm=document.getElementById('ret-msg');if(_rm)_rm.textContent='';
+  }
+  if(id==='m-payment'){
+    if(typeof populatePaymentOrders==='function') populatePaymentOrders();
+    ['pay-amt','pay-ref'].forEach(function(fid){var e=document.getElementById(fid);if(e)e.value='';});
+    var _pm=document.getElementById('pay-msg');if(_pm)_pm.textContent='';
+    var _pp=document.getElementById('prev-pay2');if(_pp)_pp.innerHTML='';
+    var _pd=document.getElementById('pay-date');if(_pd)_pd.value=today();
+    window._payPhoto=null;
+  }
+  if(id==='m-feedback'){
+    if(typeof populateFBDrops==='function') populateFBDrops();
+    var _fm=document.getElementById('fb-msg');if(_fm)_fm.textContent='';
   }
 };
 
