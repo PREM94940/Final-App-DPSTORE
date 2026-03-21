@@ -2308,6 +2308,46 @@ let attendance=[], advances=[];
 let curUser=null, ordFilter='All', stkFilter='All', selOrdId=null, billPay='Cash';
 let chart1=null, chart2=null;
 
+const RAW_VALUE_KEYS = {
+  apiKey:true, image:true, imageUrl:true, imageUrls:true, password:true, payPhotos:true,
+  ph:true, preview:true, refPhotos:true, scriptUrl:true, src:true, screenshot:true,
+  token:true, upiId:true, url:true, username:true, waSender:true, waToken:true, waUrl:true
+};
+const SAFE_CHAR_MAP = {'<':'\u2039','>':'\u203a','"':'\u201d',"'":'\u2019'};
+
+function sanitizeTextValue(v){
+  return String(v==null?'':v).replace(/[<>"']/g,function(ch){ return SAFE_CHAR_MAP[ch]||ch; });
+}
+
+function sanitizeValue(value, key){
+  if(value==null) return value;
+  if(typeof value==='string') return RAW_VALUE_KEYS[key] ? value : sanitizeTextValue(value);
+  if(Array.isArray(value)){
+    if(RAW_VALUE_KEYS[key]) return value.slice();
+    return value.map(function(item){ return sanitizeValue(item, key); });
+  }
+  if(typeof value==='object'){
+    var out = {};
+    Object.keys(value).forEach(function(k){ out[k] = sanitizeValue(value[k], k); });
+    return out;
+  }
+  return value;
+}
+
+function sanitizeAppData(){
+  orders=sanitizeValue(orders,'orders');
+  customers=sanitizeValue(customers,'customers');
+  stock=sanitizeValue(stock,'stock');
+  expenses=sanitizeValue(expenses,'expenses');
+  bills=sanitizeValue(bills,'bills');
+  tailors=sanitizeValue(tailors,'tailors');
+  staff=sanitizeValue(staff,'staff');
+  attendance=sanitizeValue(attendance,'attendance');
+  advances=sanitizeValue(advances,'advances');
+}
+
+
+
 function loadAll(){
   orders=DB.g('orders'); customers=DB.g('customers'); stock=DB.g('stock');
   expenses=DB.g('expenses'); bills=DB.g('bills'); tailors=DB.g('tailors'); staff=DB.g('staff');
@@ -2487,7 +2527,7 @@ async function syncToSheets(sheet, data, _unused) {
     : { action:action, ...( Array.isArray(data) ? _mapRow(sheet, data) : data ) };
   try {
     await fetch(CFG.scriptUrl, {
-      method:'POST', mode:'no-cors',
+      method:'POST',
       headers:{'Content-Type':'application/json'},
       body: JSON.stringify(payload)
     });
@@ -2517,7 +2557,7 @@ async function updateSheetRow(sheet, matchCol, matchVal, updateCol, updateVal) {
   if(!CFG.scriptUrl) return;
   try {
     await fetch(CFG.scriptUrl, {
-      method:'POST', mode:'no-cors',
+      method:'POST',
       headers:{'Content-Type':'application/json'},
       body: JSON.stringify({ action:'update', sheet:sheet, matchCol:matchCol, matchVal:matchVal, updateCol:updateCol, updateVal:updateVal })
     });
@@ -3131,11 +3171,26 @@ async function saveOrder(){
   ['prev-ref','prev-pay'].forEach(function(id){var e=document.getElementById(id);if(e)e.innerHTML='';});
   if(typeof _orderItems!=='undefined') _orderItems=[];
 
-  setTimeout(()=>{
-    var mOo=document.getElementById('m-order');if(mOo)mOo.classList.remove('open');renderDashboard();renderOrders();populateBillOrds();
-    const om=document.getElementById('order-msg');if(om)om.textContent='';
-    const wp=document.getElementById('wa-order-prev');if(wp)wp.style.display='none';
-  },2000);
+  // Show success message clearly
+  var _omsg = document.getElementById('order-msg');
+  if(_omsg){
+    _omsg.style.color='#2E7D32';
+    _omsg.style.fontSize='14px';
+    _omsg.style.fontWeight='700';
+    _omsg.style.padding='10px';
+    _omsg.style.background='#E8F5E9';
+    _omsg.style.borderRadius='8px';
+    _omsg.style.textAlign='center';
+    _omsg.textContent='Order ' + id + ' saved successfully!';
+  }
+  // Auto-close after 2 seconds
+  setTimeout(function(){
+    var mOo=document.getElementById('m-order');
+    if(mOo) mOo.classList.remove('open');
+    renderDashboard(); renderOrders(); populateBillOrds();
+    if(_omsg) _omsg.textContent='';
+    var wp=document.getElementById('wa-order-prev');if(wp)wp.style.display='none';
+  }, 2000);
 }
 
 function autoFill(){const c=customers.find(x=>x.phone===document.getElementById('o-phone').value);if(c)document.getElementById('o-name').value=c.name;}
@@ -3212,7 +3267,7 @@ async function saveCust(){
       shoulder:c.measurements.shoulder||'', sleeve:c.measurements.sleeve||'', length:c.measurements.length||'',
       address:c.addr||'', notes:c.notes||''
     });
-  showMsg('cust-msg',' Customer saved!','#2E7D32');
+  showMsg('cust-msg',' Customer saved successfully!','#2E7D32');
   ['c-name','c-phone','c-addr','m-s','m-b','m-w','m-h','m-sl','m-l','c-notes'].forEach(i=>{const el=document.getElementById(i);if(el)el.value='';});
   setTimeout(()=>{var _mc=document.getElementById('m-customer');if(_mc)_mc.classList.remove('open');renderCustomers();renderDashboard();document.getElementById('cust-msg').textContent='';},1200);
 }
@@ -3619,7 +3674,20 @@ function clearData(){
 }
 
 //  UTILS 
-function showMsg(id,text,color){const el=document.getElementById(id);if(el){el.textContent=text;el.style.color=color;}}
+function showMsg(id,text,color){
+  var el=document.getElementById(id);
+  if(el){
+    el.textContent=text;
+    el.style.color=color;
+    el.style.fontWeight='700';
+    el.style.fontSize='13px';
+    el.style.padding='8px';
+    el.style.background=color==='#2E7D32'?'#E8F5E9':color==='#C62828'?'#FFEBEE':'transparent';
+    el.style.borderRadius='6px';
+    el.style.textAlign='center';
+    el.style.display='block';
+  }
+}
 function setDates(){
   const t=today(),d=new Date(Date.now()+15*864e5).toISOString().slice(0,10);
   ['o-date','ex-date'].forEach(i=>{const el=document.getElementById(i);if(el)el.value=t;});
