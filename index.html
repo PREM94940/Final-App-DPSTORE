@@ -4990,6 +4990,7 @@ function importInvCSV(input) {
 async function syncShopifyProducts() {
   var token = CFG.shopifyToken;
   var storeUrl = CFG.shopifyUrl || 'y2ewk8-fu.myshopify.com';
+  var statusEl = document.getElementById('shopify-sync-status');
 
   if (!token) {
     alert('Please add your Shopify API token in Settings first!');
@@ -4997,23 +4998,52 @@ async function syncShopifyProducts() {
     return;
   }
 
-  var statusEl = document.getElementById('shopify-sync-status');
+  if (!CFG.scriptUrl) {
+    if (statusEl) statusEl.textContent = 'Add your Apps Script URL in Settings first.';
+    go('settings');
+    return;
+  }
+
   if (statusEl) statusEl.textContent = 'Syncing from Shopify...';
 
   try {
-    // Call via Apps Script proxy to avoid CORS
-    var url = CFG.scriptUrl + '?action=shopify&store=' + encodeURIComponent(storeUrl) + '&token=' + encodeURIComponent(token);
+    // Include the inventory sheet name because some Apps Script setups validate `sheet` before action routing.
+    var joiner = CFG.scriptUrl.indexOf('?')===-1 ? '?' : '&';
+    var url = CFG.scriptUrl + joiner
+      + 'action=shopify'
+      + '&sheet=INVENTORY'
+      + '&store=' + encodeURIComponent(storeUrl)
+      + '&storeUrl=' + encodeURIComponent(storeUrl)
+      + '&shop=' + encodeURIComponent(storeUrl)
+      + '&token=' + encodeURIComponent(token);
     var res = await fetch(url);
-    var data = await res.json();
+    var raw = await res.text();
+    var data = null;
+    try { data = raw ? JSON.parse(raw) : null; } catch(e) {}
 
-    if (data.error) {
-      if (statusEl) statusEl.textContent = 'Sync failed: ' + data.error;
+    if (!res.ok) {
+      if (statusEl) statusEl.textContent = 'Sync failed: ' + (raw || 'Unable to reach Apps Script.');
+      return;
+    }
+
+    if (!data) {
+      if (statusEl) statusEl.textContent = 'Sync failed: invalid response from Apps Script.';
+      return;
+    }
+
+    if (data.error || data.ok === false) {
+      if (statusEl) statusEl.textContent = 'Sync failed: ' + (data.error || data.message || 'Unknown Apps Script error');
       return;
     }
 
     _loadInv();
     var synced = 0;
-    var products = data.products || [];
+    var products = Array.isArray(data) ? data : (data.products || data.items || data.data || []);
+
+    if (!Array.isArray(products)) {
+      if (statusEl) statusEl.textContent = 'Sync failed: Shopify response did not include products.';
+      return;
+    }
 
     products.forEach(function(p) {
       var variants = p.variants || [{}];
