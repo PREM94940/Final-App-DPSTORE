@@ -74,11 +74,26 @@ html,body{height:100%;overflow:hidden;font-family:var(--font);background:var(--b
 .inv-table-name{display:flex;flex-direction:column;gap:4px;}
 .inv-table-sub{font-size:10px;color:var(--muted);font-weight:700;}
 .btn[disabled],.inv-reset-btn[disabled]{opacity:.45;cursor:not-allowed;pointer-events:none;}
+.compact-toolbar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;background:var(--card);border:.5px solid var(--border);border-radius:var(--r);padding:10px 12px;margin-bottom:10px;box-shadow:var(--shadow);}
+.compact-search{flex:1 1 260px;display:flex;align-items:center;gap:8px;padding:8px 12px;background:var(--bg);border:1px solid var(--border);border-radius:12px;min-width:220px;}
+.compact-search span{font-size:13px;color:var(--muted);}
+.compact-search input{flex:1;border:none;background:transparent;outline:none;font-size:12px;font-family:var(--font);color:var(--text);}
+.compact-toolbar select,.compact-reset{height:36px;padding:0 12px;border:1px solid var(--border);border-radius:10px;background:var(--bg);font-family:var(--font);font-size:12px;font-weight:700;color:var(--text);}
+.compact-reset{background:var(--purple-light);color:var(--purple);cursor:pointer;}
+.compact-check{display:flex;align-items:center;gap:8px;font-size:12px;font-weight:800;color:var(--text);}
+.compact-check input{width:16px;height:16px;accent-color:var(--purple);cursor:pointer;}
+.compact-count{font-size:11px;color:var(--muted);font-weight:700;white-space:nowrap;}
+.compact-mini{display:flex;align-items:center;gap:6px;}
+.compact-mini span{font-size:11px;color:var(--muted);font-weight:700;}
 @media(max-width:767px){
   .inv-toolbar-row{align-items:stretch;}
   .inv-search{min-width:0;width:100%;}
   .inv-filter-grid,.inv-layout-tools{width:100%;}
   .inv-filter-grid select,.inv-layout-tools select,.inv-reset-btn{flex:1;min-width:calc(50% - 4px);}
+  .compact-toolbar{align-items:stretch;}
+  .compact-search{width:100%;min-width:0;}
+  .compact-toolbar select,.compact-reset,.compact-mini{flex:1 1 calc(50% - 4px);}
+  .compact-count{white-space:normal;}
 }
 
 
@@ -166,6 +181,8 @@ html,body{height:100%;overflow:hidden;font-family:var(--font);background:var(--b
 .list-item{display:flex;align-items:center;gap:8px;padding:7px 0;border-bottom:.5px solid var(--border);}
 .list-item input[type=text]{flex:1;padding:6px 8px;font-size:12px;}
 .list-item-del{background:var(--red-light);color:var(--red);border:none;border-radius:6px;padding:4px 8px;font-size:11px;font-weight:700;cursor:pointer;font-family:var(--font);flex-shrink:0;}
+.list-item-move{background:var(--purple-light);color:var(--purple);border:none;border-radius:6px;padding:4px 8px;font-size:11px;font-weight:700;cursor:pointer;font-family:var(--font);flex-shrink:0;}
+.list-item-move[disabled]{opacity:.35;cursor:not-allowed;}
 /* PERM GRID */
 .perm-table{width:100%;border-collapse:collapse;font-size:11px;}
 .perm-table th{background:var(--purple);color:#fff;padding:6px 4px;text-align:center;font-size:10px;}
@@ -851,9 +868,36 @@ textarea{resize:none;height:64px;}
 
     <!-- STOCK -->
     <div class="screen" id="screen-stock">
-      <div class="sub-tabs">
-        <div class="sub-tab active" onclick="filterStk('All',this)">All Fabrics</div>
-        <div class="sub-tab" onclick="filterStk('Low',this)">Low Stock ⚠️</div>
+      <div class="compact-toolbar">
+        <div class="compact-search">
+          <span>&#128269;</span>
+          <input type="text" id="stock-q" placeholder="Search fabric, color, or supplier" oninput="renderStock()">
+        </div>
+        <select id="stock-filter" onchange="renderStock()">
+          <option value="all">All Stock</option>
+          <option value="low">Low Stock</option>
+          <option value="instock">In Stock</option>
+          <option value="empty">Zero Qty</option>
+        </select>
+        <select id="stock-cat-filter" onchange="renderStock()">
+          <option value="all">All Categories</option>
+        </select>
+        <select id="stock-sort" onchange="renderStock()">
+          <option value="newest">Newest First</option>
+          <option value="name_asc">Name A-Z</option>
+          <option value="qty_desc">Qty High-Low</option>
+          <option value="qty_asc">Qty Low-High</option>
+          <option value="cost_desc">Cost High-Low</option>
+          <option value="cost_asc">Cost Low-High</option>
+        </select>
+        <label class="compact-check">
+          <input type="checkbox" id="stock-select-visible" onchange="toggleStockSelectVisible(this.checked)">
+          <span id="stock-selection-summary">0 selected</span>
+        </label>
+        <span class="compact-count" id="stock-selection-meta">Manage fabric stock in one row.</span>
+        <button class="btn btn-purple" style="width:auto;padding:8px 14px;font-size:12px;" onclick="openModal('m-stock')">+ Add Fabric</button>
+        <button class="btn btn-blue" style="width:auto;padding:8px 14px;font-size:12px;" id="stock-bulk-edit-btn" onclick="openStockBulkEdit()" disabled>Bulk Edit</button>
+        <button class="btn btn-red" style="width:auto;padding:8px 14px;font-size:12px;" id="stock-bulk-del-btn" onclick="bulkDeleteStock()" disabled>Delete Selected</button>
       </div>
       <div id="stock-list"></div>
       <div style="height:70px;"></div>
@@ -894,6 +938,34 @@ textarea{resize:none;height:64px;}
       <div class="stat-grid">
         <div class="stat-card"><div class="stat-label">This Month</div><div class="stat-val clr-expense" id="exp-month">₹0</div></div>
         <div class="stat-card"><div class="stat-label">Today</div><div class="stat-val clr-expense" id="exp-today">₹0</div></div>
+      </div>
+      <div class="compact-toolbar">
+        <div class="compact-search">
+          <span>&#128269;</span>
+          <input type="text" id="exp-q" placeholder="Search category, note, or date" oninput="renderExpenses()">
+        </div>
+        <select id="exp-cat-filter" onchange="renderExpenses()">
+          <option value="all">All Categories</option>
+        </select>
+        <select id="exp-date-filter" onchange="renderExpenses()">
+          <option value="all">All Time</option>
+          <option value="today">Today</option>
+          <option value="month">This Month</option>
+        </select>
+        <select id="exp-sort" onchange="renderExpenses()">
+          <option value="newest">Newest First</option>
+          <option value="oldest">Oldest First</option>
+          <option value="amt_desc">Amount High-Low</option>
+          <option value="amt_asc">Amount Low-High</option>
+        </select>
+        <label class="compact-check">
+          <input type="checkbox" id="exp-select-visible" onchange="toggleExpenseSelectVisible(this.checked)">
+          <span id="exp-selection-summary">0 selected</span>
+        </label>
+        <span class="compact-count" id="exp-selection-meta">Review and reclassify expenses quickly.</span>
+        <button class="btn btn-purple" style="width:auto;padding:8px 14px;font-size:12px;" onclick="openModal('m-expense')">+ Add Expense</button>
+        <button class="btn btn-blue" style="width:auto;padding:8px 14px;font-size:12px;" id="exp-bulk-edit-btn" onclick="openExpenseBulkEdit()" disabled>Bulk Edit</button>
+        <button class="btn btn-red" style="width:auto;padding:8px 14px;font-size:12px;" id="exp-bulk-del-btn" onclick="bulkDeleteExpenses()" disabled>Delete Selected</button>
       </div>
       <div id="expense-list"></div>
       <div style="height:70px;"></div>
@@ -1123,8 +1195,7 @@ textarea{resize:none;height:64px;}
                 <div class="calc-row"><span>Absent Days</span><input type="number" id="calc-absent" value="0" oninput="recalcSalary()"></div>
                 <div class="calc-row"><span>Unpaid Leave Days</span><input type="number" id="calc-unpaid" value="0" oninput="recalcSalary()"></div>
                 <div class="calc-row"><span>Late Deduction (₹)</span><input type="number" id="calc-late-ded" value="0" oninput="recalcSalary()"></div>
-                <div class="calc-row"><span>ESI (0.75%)</span><span id="calc-esi">₹0</span></div>
-                <div class="calc-row"><span>PF (12%)</span><span id="calc-pf">₹0</span></div>
+                <div class="calc-row"><span>ESI / PF</span><span id="calc-statutory-note">Not used</span></div>
                 <div class="calc-row"><span>Advance Deduction</span><input type="number" id="calc-adv-ded" value="0" oninput="recalcSalary()"></div>
               </div>
             </div>
@@ -1240,7 +1311,11 @@ textarea{resize:none;height:64px;}
           <div class="form-title">🧵 Production Workers</div>
           <div style="font-size:11px;color:var(--muted);margin-bottom:12px;">These are your daily/monthly wage workers tracked in Attendance & Salary. Changes apply immediately.</div>
           <div id="settings-emp-list" style="margin-bottom:12px;"></div>
-          <button class="btn btn-purple" onclick="showAddEmpForm()">+ Add Worker</button>
+          <div class="btn-row">
+            <button class="btn btn-blue" onclick="syncStaffToWorkers()">Sync Staff Accounts</button>
+            <button class="btn btn-purple" onclick="showAddEmpForm()">+ Add Worker</button>
+          </div>
+          <div class="save-msg" id="sync-workers-msg"></div>
         </div>
         <div class="form-card" id="add-emp-card" style="display:none;">
           <div class="form-title" id="add-emp-title">➕ Add New Worker</div>
@@ -1500,51 +1575,45 @@ textarea{resize:none;height:64px;}
         <div class="sub-tab" data-inv-filter="low" onclick="fInv('low',this)">Low Stock</div>
         <div class="sub-tab" data-inv-filter="sold" onclick="fInv('sold',this)">Sold</div>
       </div>
-      <div class="inv-toolbar">
-        <div class="inv-toolbar-row">
-          <div class="inv-search">
-            <span>&#128269;</span>
-            <input type="text" id="inv-search" placeholder="Search code, product, fabric, or group" oninput="setInvSearch(this.value)">
-          </div>
-          <div class="inv-filter-grid">
-            <select id="inv-sort" onchange="setInvSort(this.value)">
-              <option value="newest">Newest First</option>
-              <option value="oldest">Oldest First</option>
-              <option value="name_asc">Name A-Z</option>
-              <option value="name_desc">Name Z-A</option>
-              <option value="price_desc">Price High-Low</option>
-              <option value="price_asc">Price Low-High</option>
-              <option value="qty_desc">Qty High-Low</option>
-              <option value="qty_asc">Qty Low-High</option>
-            </select>
-            <select id="inv-cat-filter" onchange="setInvCatFilter(this.value)">
-              <option value="all">All Categories</option>
-            </select>
-            <select id="inv-group-filter" onchange="setInvGroupFilter(this.value)">
-              <option value="all">All Groups</option>
-            </select>
-            <button type="button" class="inv-reset-btn" onclick="resetInvFilters()">Reset</button>
-          </div>
+      <div class="compact-toolbar">
+        <div class="compact-search">
+          <span>&#128269;</span>
+          <input type="text" id="inv-search" placeholder="Search code, product, fabric, or group" oninput="setInvSearch(this.value)">
         </div>
-        <div class="inv-toolbar-row">
-          <div class="inv-selection-hint">
-            <label class="inv-check-row">
-              <input type="checkbox" id="inv-select-visible" onchange="toggleInvSelectVisible(this.checked)">
-              <span id="inv-selection-summary">0 selected</span>
-            </label>
-            <span class="inv-selection-meta" id="inv-selection-meta">Select products to bulk edit, delete, or move into a new group.</span>
-          </div>
-          <div class="inv-layout-tools">
-            <span>Columns</span>
-            <select id="inv-cols-picker" onchange="localStorage.setItem('inv_cols',this.value);renderInventory()">
-              <option value="1">1</option><option value="2" selected>2</option><option value="3">3</option><option value="4">4</option>
-            </select>
-            <span>Show</span>
-            <select id="inv-pp-picker" onchange="localStorage.setItem('inv_per_page',this.value);renderInventory()">
-              <option value="10">10</option><option value="20" selected>20</option><option value="50">50</option><option value="9999">All</option>
-            </select>
-          </div>
+        <select id="inv-sort" onchange="setInvSort(this.value)">
+          <option value="newest">Newest First</option>
+          <option value="oldest">Oldest First</option>
+          <option value="name_asc">Name A-Z</option>
+          <option value="name_desc">Name Z-A</option>
+          <option value="price_desc">Price High-Low</option>
+          <option value="price_asc">Price Low-High</option>
+          <option value="qty_desc">Qty High-Low</option>
+          <option value="qty_asc">Qty Low-High</option>
+        </select>
+        <select id="inv-cat-filter" onchange="setInvCatFilter(this.value)">
+          <option value="all">All Categories</option>
+        </select>
+        <select id="inv-group-filter" onchange="setInvGroupFilter(this.value)">
+          <option value="all">All Groups</option>
+        </select>
+        <label class="compact-check">
+          <input type="checkbox" id="inv-select-visible" onchange="toggleInvSelectVisible(this.checked)">
+          <span id="inv-selection-summary">0 selected</span>
+        </label>
+        <span class="compact-count" id="inv-selection-meta">Select products to bulk edit, delete, or move into a new group.</span>
+        <div class="compact-mini">
+          <span>Cols</span>
+          <select id="inv-cols-picker" onchange="localStorage.setItem('inv_cols',this.value);renderInventory()">
+            <option value="1">1</option><option value="2" selected>2</option><option value="3">3</option><option value="4">4</option>
+          </select>
         </div>
+        <div class="compact-mini">
+          <span>Show</span>
+          <select id="inv-pp-picker" onchange="localStorage.setItem('inv_per_page',this.value);renderInventory()">
+            <option value="10">10</option><option value="20" selected>20</option><option value="50">50</option><option value="9999">All</option>
+          </select>
+        </div>
+        <button type="button" class="compact-reset" onclick="resetInvFilters()">Reset</button>
       </div>
       <div class="btn-row" style="margin-bottom:10px;">
         <button class="btn btn-purple" onclick="openModal('m-inv')">+ Add Product</button>
@@ -1982,6 +2051,31 @@ textarea{resize:none;height:64px;}
   </div>
   <button class="btn btn-purple" onclick="saveExp()">Save Expense</button>
   <div class="save-msg" id="exp-msg"></div>
+</div></div>
+
+<div class="modal-overlay" id="m-stock-bulk"><div class="modal">
+  <button class="modal-close" onclick="closeModal('m-stock-bulk')">X</button>
+  <div class="modal-title">Bulk Edit Stock</div>
+  <div style="font-size:12px;color:var(--muted);margin-bottom:12px;" id="stock-bulk-count">0 fabrics selected</div>
+  <div class="f-row">
+    <div class="f-group"><label class="f-label">Category</label><select id="stock-bulk-cat"><option value="">Keep current</option></select></div>
+    <div class="f-group"><label class="f-label">Supplier</label><input type="text" id="stock-bulk-supp" placeholder="Keep current"></div>
+  </div>
+  <div class="f-group"><label class="f-label">Color</label><input type="text" id="stock-bulk-color" placeholder="Keep current"></div>
+  <button class="btn btn-purple" onclick="applyStockBulkEdit()">Apply Changes</button>
+  <div class="save-msg" id="stock-bulk-msg"></div>
+</div></div>
+
+<div class="modal-overlay" id="m-exp-bulk"><div class="modal">
+  <button class="modal-close" onclick="closeModal('m-exp-bulk')">X</button>
+  <div class="modal-title">Bulk Edit Expenses</div>
+  <div style="font-size:12px;color:var(--muted);margin-bottom:12px;" id="exp-bulk-count">0 expenses selected</div>
+  <div class="f-row">
+    <div class="f-group"><label class="f-label">Category</label><select id="exp-bulk-cat"><option value="">Keep current</option></select></div>
+    <div class="f-group"><label class="f-label">Date</label><input type="date" id="exp-bulk-date"></div>
+  </div>
+  <button class="btn btn-purple" onclick="applyExpenseBulkEdit()">Apply Changes</button>
+  <div class="save-msg" id="exp-bulk-msg"></div>
 </div></div>
 
 <div class="modal-overlay" id="m-status"><div class="modal">
