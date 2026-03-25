@@ -2462,6 +2462,7 @@ textarea{resize:none;height:64px;}
   </div>
 </div>
 <script>
+
 //  CONFIG 
 let CFG = {
   sheetId:'', scriptUrl:'', waUrl:'', waToken:'', waSender:'',
@@ -2562,6 +2563,212 @@ const today=()=>new Date().toISOString().slice(0,10);
 const monthStr=()=>new Date().toISOString().slice(0,7);
 const fmt=n=>''+Math.round(n||0).toLocaleString('en-IN');
 const uid=()=>Date.now().toString(36)+Math.random().toString(36).slice(2,5);
+const SHEET_AUTO_SYNC_MS = 60000;
+
+let _sheetAutoSyncTimer = null;
+let _sheetSyncInFlight = false;
+
+function normalizePhone(value){
+  var digits = String(value||'').replace(/\D+/g,'');
+  if(digits.length > 10) digits = digits.slice(-10);
+  return digits;
+}
+
+function samePhone(a,b){
+  var left = normalizePhone(a);
+  var right = normalizePhone(b);
+  return !!left && left===right;
+}
+
+function findCustomerRecord(match){
+  match = match || {};
+  var targetId = String(match.id||match.customerId||'').trim();
+  if(targetId){
+    var byId = customers.find(function(c){ return String(c.id||'').trim()===targetId; });
+    if(byId) return byId;
+  }
+  var targetPhone = normalizePhone(match.phone);
+  if(!targetPhone) return null;
+  return customers.find(function(c){ return normalizePhone(c.phone)===targetPhone; }) || null;
+}
+
+function orderBelongsToCustomer(order, customer){
+  if(!order || !customer) return false;
+  return order.custId===customer.id || samePhone(order.phone, customer.phone);
+}
+
+function getCustomerFormData(){
+  return {
+    name: document.getElementById('c-name').value.trim(),
+    phone: document.getElementById('c-phone').value.trim(),
+    city: document.getElementById('c-city').value||'Warangal',
+    type: document.getElementById('c-type').value,
+    addr: document.getElementById('c-addr').value,
+    notes: document.getElementById('c-notes').value,
+    measurements: {
+      shoulder: document.getElementById('m-s').value,
+      bust: document.getElementById('m-b').value,
+      waist: document.getElementById('m-w').value,
+      hip: document.getElementById('m-h').value,
+      sleeve: document.getElementById('m-sl').value,
+      length: document.getElementById('m-l').value
+    }
+  };
+}
+
+function buildCustomerSheetPayload(customer){
+  return {
+    customerId: customer.id,
+    name: customer.name||'',
+    phone: customer.phone||'',
+    city: customer.city||'Warangal',
+    type: customer.type||'Regular',
+    bust: (customer.measurements&&customer.measurements.bust)||'',
+    waist: (customer.measurements&&customer.measurements.waist)||'',
+    hip: (customer.measurements&&customer.measurements.hip)||'',
+    shoulder: (customer.measurements&&customer.measurements.shoulder)||'',
+    sleeve: (customer.measurements&&customer.measurements.sleeve)||'',
+    length: (customer.measurements&&customer.measurements.length)||'',
+    address: customer.addr||'',
+    notes: customer.notes||''
+  };
+}
+
+function applyCustomerData(target, data){
+  var changed = false;
+  var nextMeasurements = {
+    shoulder: String((data.measurements&&data.measurements.shoulder)||''),
+    bust: String((data.measurements&&data.measurements.bust)||''),
+    waist: String((data.measurements&&data.measurements.waist)||''),
+    hip: String((data.measurements&&data.measurements.hip)||''),
+    sleeve: String((data.measurements&&data.measurements.sleeve)||''),
+    length: String((data.measurements&&data.measurements.length)||'')
+  };
+
+  [
+    ['name', data.name||''],
+    ['phone', data.phone||''],
+    ['city', data.city||'Warangal'],
+    ['type', data.type||'Regular'],
+    ['addr', data.addr||''],
+    ['notes', data.notes||'']
+  ].forEach(function(entry){
+    var key = entry[0];
+    var value = entry[1];
+    if((target[key]||'')!==value){
+      target[key] = value;
+      changed = true;
+    }
+  });
+
+  var current = target.measurements||{};
+  if(['shoulder','bust','waist','hip','sleeve','length'].some(function(key){
+    return String(current[key]||'')!==nextMeasurements[key];
+  })){
+    target.measurements = nextMeasurements;
+    changed = true;
+  }
+
+  return changed;
+}
+
+function syncCustomerReferences(customer, previous){
+  previous = previous || {};
+  var changed = false;
+  orders.forEach(function(order){
+    var matches = order.custId===customer.id
+      || samePhone(order.phone, previous.phone)
+      || samePhone(order.phone, customer.phone);
+    if(!matches) return;
+    if(order.custId!==customer.id){ order.custId = customer.id; changed = true; }
+    if((order.custName||'')!==(customer.name||'')){ order.custName = customer.name||''; changed = true; }
+    if((order.phone||'')!==(customer.phone||'')){ order.phone = customer.phone||''; changed = true; }
+  });
+  return changed;
+}
+
+function buildCustomerFromSheetRow(row){
+  return {
+    id: String(row['Customer ID']||row['customer id']||'').trim(),
+    name: String(row['Name']||row['name']||''),
+    phone: String(row['Phone']||row['phone']||'').trim(),
+    city: String(row['City']||row['city']||'Warangal'),
+    type: String(row['Type']||row['type']||'Regular'),
+    addr: String(row['Address']||row['address']||''),
+    notes: String(row['Notes']||row['notes']||''),
+    measurements: {
+      shoulder: String(row['Shoulder']||row['shoulder']||''),
+      bust: String(row['Bust']||row['bust']||''),
+      waist: String(row['Waist']||row['waist']||''),
+      hip: String(row['Hip']||row['hip']||''),
+      sleeve: String(row['Sleeve']||row['sleeve']||''),
+      length: String(row['Length']||row['length']||'')
+    }
+  };
+}
+
+function buildOrderFromSheetRow(row){
+  return {
+    id: String(row['Order ID']||row['order id']||'').trim(),
+    custName: String(row['Customer']||row['customer']||''),
+    phone: String(row['Phone']||row['phone']||'').trim(),
+    product: String(row['Product']||row['product']||''),
+    fabric: String(row['Fabric']||row['fabric']||''),
+    price: parseFloat(row['Price']||row['price'])||0,
+    advance: parseFloat(row['Advance']||row['advance'])||0,
+    orderDate: String(row['Order Date']||row['order date']||'').slice(0,10),
+    deliveryDate: String(row['Delivery Date']||row['delivery date']||'').slice(0,10),
+    status: String(row['Status']||row['status']||'New Order'),
+    tailor: String(row['Tailor']||row['tailor']||''),
+    notes: String(row['Notes']||row['notes']||'')
+  };
+}
+
+function applyOrderSheetData(target, data){
+  var changed = false;
+  ['custName','phone','product','fabric','orderDate','deliveryDate','status','tailor','notes'].forEach(function(key){
+    if((target[key]||'')!==(data[key]||'')){
+      target[key] = data[key]||'';
+      changed = true;
+    }
+  });
+  ['price','advance'].forEach(function(key){
+    if((Number(target[key])||0)!==(Number(data[key])||0)){
+      target[key] = Number(data[key])||0;
+      changed = true;
+    }
+  });
+  if(!target.custId){
+    var linked = findCustomerRecord({phone:data.phone});
+    if(linked && target.custId!==linked.id){
+      target.custId = linked.id;
+      changed = true;
+    }
+  }
+  return changed;
+}
+
+async function syncCustomerUpsert(customer){
+  if(!CFG.scriptUrl) return '';
+  try{
+    await syncToSheets('CUSTOMERS', buildCustomerSheetPayload(customer));
+    customer._synced = true;
+    return '';
+  }catch(err){
+    return ' Saved in app, but Google Sheets sync failed.';
+  }
+}
+
+function startSheetAutoSync(){
+  if(_sheetAutoSyncTimer){
+    clearInterval(_sheetAutoSyncTimer);
+    _sheetAutoSyncTimer = null;
+  }
+  if(!CFG.scriptUrl) return;
+  _sheetAutoSyncTimer = setInterval(function(){
+    syncAllFromSheet({ silent:true });
+  }, SHEET_AUTO_SYNC_MS);
+}
 
 //  AUTH 
 let _selRoleVal='admin';
@@ -2647,7 +2854,7 @@ function loginAs(u){
   });
   // Load local data first for instant display
   loadAll();
-  setDates(); populateTailors(); populateBillOrds(); populateEmpDrops(); checkSync();
+  setDates(); populateTailors(); populateBillOrds(); populateEmpDrops(); checkSync(); startSheetAutoSync();
   renderDashboard();
   buildSidebar(u.role);
 
@@ -2659,7 +2866,7 @@ function loginAs(u){
   }
 }
 
-function doLogout(){if(confirm('Logout?')){document.getElementById('login-screen').style.display='flex';document.getElementById('main-app').style.display='none';curUser=null;}}
+function doLogout(){if(confirm('Logout?')){if(_sheetAutoSyncTimer){clearInterval(_sheetAutoSyncTimer);_sheetAutoSyncTimer=null;}document.getElementById('login-screen').style.display='flex';document.getElementById('main-app').style.display='none';curUser=null;}}
 
 //  NAVIGATION 
 function go(name){
@@ -2976,11 +3183,12 @@ function waMsg(type,d){
 //  DASHBOARD 
 
 //  Sync ALL data from Google Sheet on login 
-async function syncAllFromSheet() {
-  if(!CFG.scriptUrl) return;
+async function syncAllFromSheet(opts) {
+  opts = opts || {};
+  if(!CFG.scriptUrl || _sheetSyncInFlight) return;
+  _sheetSyncInFlight = true;
   var changed = false;
 
-  // Helper: fetch a sheet and return rows
   async function fetchSheet(name) {
     try {
       var r = await fetch(CFG.scriptUrl + '?sheet=' + name);
@@ -2989,70 +3197,84 @@ async function syncAllFromSheet() {
     } catch(e) { return []; }
   }
 
-  // Sync ORDERS
   try {
     var rows = await fetchSheet('ORDERS');
     if(rows.length) {
-      rows.forEach(function(row) {
-        var id = String(row['Order ID']||row['order id']||'').trim();
-        if(!id) return;
-        var ex = orders.find(function(o){ return o.id===id; });
+      var orderRows = new Map();
+      rows.forEach(function(row){
+        var parsed = buildOrderFromSheetRow(row);
+        if(parsed.id) orderRows.set(parsed.id, parsed);
+      });
+      orderRows.forEach(function(parsed){
+        var ex = orders.find(function(o){ return o.id===parsed.id; });
         if(!ex) {
+          var linked = findCustomerRecord({phone:parsed.phone});
           orders.push({
-            id: id,
-            custName: String(row['Customer']||row['customer']||''),
-            phone:    String(row['Phone']||row['phone']||''),
-            product:  String(row['Product']||row['product']||''),
-            fabric:   String(row['Fabric']||row['fabric']||''),
-            price:    parseFloat(row['Price']||row['price'])||0,
-            advance:  parseFloat(row['Advance']||row['advance'])||0,
-            orderDate:    String(row['Order Date']||row['order date']||'').slice(0,10),
-            deliveryDate: String(row['Delivery Date']||row['delivery date']||'').slice(0,10),
-            status:   String(row['Status']||row['status']||'New Order'),
-            tailor:   String(row['Tailor']||row['tailor']||''),
-            notes:    String(row['Notes']||row['notes']||''),
-            custId:'', refPhotos:[], payPhotos:[]
+            id: parsed.id,
+            custName: parsed.custName,
+            phone: parsed.phone,
+            product: parsed.product,
+            fabric: parsed.fabric,
+            price: parsed.price,
+            advance: parsed.advance,
+            orderDate: parsed.orderDate,
+            deliveryDate: parsed.deliveryDate,
+            status: parsed.status,
+            tailor: parsed.tailor,
+            notes: parsed.notes,
+            custId: linked ? linked.id : '',
+            refPhotos: [],
+            payPhotos: []
           });
           changed = true;
-        } else {
-          // Update status if changed
-          var newStatus = String(row['Status']||row['status']||'').trim();
-          if(newStatus && ex.status !== newStatus) { ex.status = newStatus; changed = true; }
+          return;
         }
+        if(applyOrderSheetData(ex, parsed)) changed = true;
       });
     }
-  } catch(e) {}
 
-  // Sync CUSTOMERS
-  try {
     var crows = await fetchSheet('CUSTOMERS');
     if(crows.length) {
-      crows.forEach(function(row) {
-        var phone = String(row['Phone']||row['phone']||'').trim();
-        if(!phone) return;
-        var ex = customers.find(function(c){ return c.phone===phone; });
+      var customerRows = new Map();
+      crows.forEach(function(row){
+        var parsed = buildCustomerFromSheetRow(row);
+        var key = parsed.id || normalizePhone(parsed.phone);
+        if(key) customerRows.set(key, parsed);
+      });
+      customerRows.forEach(function(parsed){
+        var ex = findCustomerRecord({id:parsed.id, phone:parsed.phone});
         if(!ex) {
-          customers.push({
-            id: String(row['Customer ID']||row['customer id']||'C'+Date.now()),
-            name: String(row['Name']||row['name']||''),
-            phone: phone,
-            city:  String(row['City']||row['city']||'Warangal'),
-            type:  String(row['Type']||row['type']||'Regular'),
-            addr:'', notes:'', orders:0, spend:0, lastOrder:'',
-            measurements:{
-              bust:  String(row['Bust']||''),
-              waist: String(row['Waist']||''),
-              hip:   String(row['Hip']||'')
-            }
-          });
+          ex = {
+            id: parsed.id || ('C'+uid()),
+            name: '',
+            phone: '',
+            city: 'Warangal',
+            type: 'Regular',
+            addr: '',
+            notes: '',
+            measurements: {},
+            orders: 0,
+            spend: 0,
+            lastOrder: '',
+            _synced: true
+          };
+          applyCustomerData(ex, parsed);
+          customers.push(ex);
+          if(syncCustomerReferences(ex, {})) changed = true;
+          changed = true;
+          return;
+        }
+        var previous = { phone: ex.phone };
+        if(parsed.id && ex.id!==parsed.id){
+          ex.id = parsed.id;
           changed = true;
         }
+        if(applyCustomerData(ex, parsed)) changed = true;
+        ex._synced = true;
+        if(syncCustomerReferences(ex, previous)) changed = true;
       });
     }
-  } catch(e) {}
 
-  // Sync INVENTORY
-  try {
     var irows = await fetchSheet('INVENTORY');
     if(typeof _loadInv==='function') _loadInv();
     if(irows.length) {
@@ -3080,12 +3302,13 @@ async function syncAllFromSheet() {
       });
       if(typeof _saveInv==='function') _saveInv();
     }
-  } catch(e) {}
+  } finally {
+    _sheetSyncInFlight = false;
+  }
 
   if(changed) {
     saveAll();
     renderDashboard();
-    // Re-render current tab
     var active = document.querySelector('.screen.active');
     if(active) {
       var id = active.id.replace('screen-','');
@@ -3093,8 +3316,9 @@ async function syncAllFromSheet() {
       if(id==='customers') renderCustomers();
       if(id==='inventory') renderInventory();
     }
-    // Show sync indicator
     setSyncState('online');
+  } else if(!opts.silent) {
+    setSyncState('configured');
   }
 }
 
@@ -3428,7 +3652,7 @@ async function saveOrder(){
   orders.unshift(o);
 
   // Customer
-  let c=customers.find(x=>x.phone===phone);
+  let c=findCustomerRecord({phone:phone});
   if(!c){c={id:'C'+uid(),name,phone,city:'Warangal',type:'Regular',addr:'',measurements:{},notes:'',orders:0,spend:0,lastOrder:today()};customers.push(c);}
   c.orders=(c.orders||0)+1; c.spend=(c.spend||0)+totalPrice; c.lastOrder=today(); o.custId=c.id;
   saveAll();
@@ -3464,7 +3688,7 @@ async function saveOrder(){
     }catch(e){}
   }
   try{await syncToSheets('ORDERS',{orderId:o.id,customer:name,phone:phone,product:o.product,fabric:o.fabric,price:totalPrice,advance:adv,orderDate:o.orderDate,deliveryDate:delivery,status:'New Order',tailor:o.tailor,notes:o.notes,referenceImage:_refUrl,paymentScreenshot:_payUrl});}catch(e){}
-  try{if(c&&!c._synced){await syncToSheets('CUSTOMERS',{customerId:c.id,name:c.name,phone:c.phone,city:c.city||'Warangal',type:c.type||'Regular',bust:'',waist:'',hip:'',shoulder:'',sleeve:'',length:'',address:'',notes:''});c._synced=true;saveAll();}}catch(e){}
+  try{if(c&&!c._synced){var _custWarn=await syncCustomerUpsert(c);if(!_custWarn)saveAll();}}catch(e){}
 
   showMsg('order-msg','Order '+id+' saved!','#2E7D32');
 
@@ -3496,7 +3720,7 @@ async function saveOrder(){
   }, 2000);
 }
 
-function autoFill(){const c=customers.find(x=>x.phone===document.getElementById('o-phone').value);if(c)document.getElementById('o-name').value=c.name;}
+function autoFill(){const c=findCustomerRecord({phone:document.getElementById('o-phone').value});if(c)document.getElementById('o-name').value=c.name;}
 
 //  CUSTOMERS 
 function renderCustomers(){
@@ -3547,32 +3771,31 @@ function renderCustomers(){
 }
 
 async function saveCust(){
-  const name=document.getElementById('c-name').value.trim();
-  const phone=document.getElementById('c-phone').value.trim();
+  var form = getCustomerFormData();
+  const name=form.name;
+  const phone=form.phone;
   if(!name||!phone){showMsg('cust-msg','Name and phone required.','#C62828');return;}
-  var existing=customers.find(c=>c.phone===phone);
+  var existing=findCustomerRecord({phone:phone});
   if(existing){
     if(confirm('Customer with phone '+phone+' already exists ('+existing.name+'). Update their details?')){
-      existing.name=name;existing.city=document.getElementById('c-city').value||'Warangal';
-      existing.type=document.getElementById('c-type').value;existing.addr=document.getElementById('c-addr').value;
-      existing.measurements={shoulder:document.getElementById('m-s').value,bust:document.getElementById('m-b').value,waist:document.getElementById('m-w').value,hip:document.getElementById('m-h').value,sleeve:document.getElementById('m-sl').value,length:document.getElementById('m-l').value};
-      existing.notes=document.getElementById('c-notes').value;
-      saveAll();showMsg('cust-msg','Customer updated!','#2E7D32');
-      setTimeout(()=>{var _mc=document.getElementById('m-customer');if(_mc)_mc.classList.remove('open');renderCustomers();document.getElementById('cust-msg').textContent='';},1200);
+      var previous = { phone: existing.phone };
+      applyCustomerData(existing, form);
+      syncCustomerReferences(existing, previous);
+      saveAll();
+      var warning = await syncCustomerUpsert(existing);
+      if(!warning) saveAll();
+      showMsg('cust-msg','Customer updated!'+warning,warning?'#E65100':'#2E7D32');
+      setTimeout(()=>{var _mc=document.getElementById('m-customer');if(_mc)_mc.classList.remove('open');renderCustomers();renderOrders();renderDashboard();document.getElementById('cust-msg').textContent='';},1200);
     }
     return;
   }
-  const c={id:'C'+uid(),name,phone,city:document.getElementById('c-city').value||'Warangal',type:document.getElementById('c-type').value,addr:document.getElementById('c-addr').value,measurements:{shoulder:document.getElementById('m-s').value,bust:document.getElementById('m-b').value,waist:document.getElementById('m-w').value,hip:document.getElementById('m-h').value,sleeve:document.getElementById('m-sl').value,length:document.getElementById('m-l').value},notes:document.getElementById('c-notes').value,orders:0,spend:0,lastOrder:''};
+  const c={id:'C'+uid(),name,phone,city:form.city,type:form.type,addr:form.addr,measurements:form.measurements,notes:form.notes,orders:0,spend:0,lastOrder:'',_synced:false};
   customers.push(c);saveAll();
-  await syncToSheets('CUSTOMERS', {
-      customerId:c.id, name:c.name, phone:c.phone, city:c.city, type:c.type,
-      bust:c.measurements.bust||'', waist:c.measurements.waist||'', hip:c.measurements.hip||'',
-      shoulder:c.measurements.shoulder||'', sleeve:c.measurements.sleeve||'', length:c.measurements.length||'',
-      address:c.addr||'', notes:c.notes||''
-    });
-  showMsg('cust-msg',' Customer saved successfully!','#2E7D32');
+  var warning = await syncCustomerUpsert(c);
+  if(!warning) saveAll();
+  showMsg('cust-msg',' Customer saved successfully!'+warning,warning?'#E65100':'#2E7D32');
   ['c-name','c-phone','c-addr','m-s','m-b','m-w','m-h','m-sl','m-l','c-notes'].forEach(i=>{const el=document.getElementById(i);if(el)el.value='';});
-  setTimeout(()=>{var _mc=document.getElementById('m-customer');if(_mc)_mc.classList.remove('open');renderCustomers();renderDashboard();document.getElementById('cust-msg').textContent='';},1200);
+  setTimeout(()=>{var _mc=document.getElementById('m-customer');if(_mc)_mc.classList.remove('open');renderCustomers();renderDashboard();renderOrders();document.getElementById('cust-msg').textContent='';},1200);
 }
 
 //  STOCK 
@@ -3917,7 +4140,8 @@ function loadSettingsUI(){
 function saveCfgSheets(){
   CFG.sheetId=document.getElementById('cfg-sheet-id').value.trim();
   CFG.scriptUrl=document.getElementById('cfg-script-url').value.trim();
-  saveCfg();checkSync();
+  saveCfg();checkSync();startSheetAutoSync();
+  if(CFG.scriptUrl) setTimeout(function(){ syncAllFromSheet({ silent:true }); }, 200);
   setSheetsMsg(CFG.scriptUrl?'Settings saved. Use Test Connection to verify sync.':'Saved. Add the Apps Script URL to enable sync.', CFG.scriptUrl?'#2E7D32':'var(--muted)');
 }
 function saveCfgWA(){
@@ -3960,7 +4184,7 @@ function parseCSV(file,type){
     lines.slice(1).forEach(row=>{
       const clean=parseCSVRow(row);
       const obj={};headers.forEach((h,i)=>obj[h]=clean[i]||'');
-      if(type==='customers'&&obj.phone&&obj.name&&!customers.find(c=>c.phone===obj.phone)){customers.push({id:'C'+uid(),name:obj.name||obj['customer name']||'',phone:obj.phone||'',city:obj.city||'Warangal',type:obj.type||'Regular',addr:obj.address||'',measurements:{shoulder:obj.shoulder||'',bust:obj.bust||'',waist:obj.waist||'',hip:obj.hip||'',sleeve:obj.sleeve||'',length:obj.length||''},notes:obj.notes||'',orders:parseInt(obj.orders)||0,spend:parseFloat(obj.spend)||0,lastOrder:''});imported++;}
+      if(type==='customers'&&obj.phone&&obj.name&&!findCustomerRecord({phone:obj.phone})){customers.push({id:'C'+uid(),name:obj.name||obj['customer name']||'',phone:obj.phone||'',city:obj.city||'Warangal',type:obj.type||'Regular',addr:obj.address||'',measurements:{shoulder:obj.shoulder||'',bust:obj.bust||'',waist:obj.waist||'',hip:obj.hip||'',sleeve:obj.sleeve||'',length:obj.length||''},notes:obj.notes||'',orders:parseInt(obj.orders)||0,spend:parseFloat(obj.spend)||0,lastOrder:''});imported++;}
       if(type==='orders'&&obj.product){orders.push({id:obj['order id']||'ORD'+uid(),custId:'',custName:obj.customer||'',phone:obj.phone||'',product:obj.product||'',fabric:obj.fabric||'',price:parseFloat(obj.price)||0,advance:parseFloat(obj.advance)||0,orderDate:obj['order date']||today(),deliveryDate:obj['delivery date']||'',status:obj.status||'New Order',tailor:obj.tailor||'',notes:obj.notes||''});imported++;}
       if(type==='expenses'&&obj.amount){expenses.push({id:uid(),cat:obj.category||'Miscellaneous',amount:parseFloat(obj.amount)||0,date:obj.date||today(),note:obj.note||''});imported++;}
     });
@@ -4214,465 +4438,6 @@ function showInvPhoto(id) {
   if (item && item.ph) _viewImg(item.ph);
 }
 
-// ===== INVENTORY ENHANCEMENTS =====
-var _invQuery = localStorage.getItem('inv_query') || '';
-var _invSort = localStorage.getItem('inv_sort') || 'newest';
-var _invCatF = localStorage.getItem('inv_cat_filter') || 'all';
-var _invGroupF = localStorage.getItem('inv_group_filter') || 'all';
-var _invSel = {};
-var _invVisible = [];
-var INV_BASE_CATS = ['Half Saree','Blouse','Salwar Suit','Lehenga','Silk Saree','Kurti','Churidar','Pattu Pavadai','Custom Design'];
-
-function _loadInv() { _inv = DB.g('inventory') || []; }
-function _saveInv() { DB.s('inventory', _inv); }
-function invText(v){ return v==null ? '' : String(v); }
-function invTrim(v){ return invText(v).trim(); }
-function invNorm(v){ return invTrim(v).toLowerCase(); }
-function invEsc(v){
-  return invText(v).replace(/[&<>"']/g,function(ch){
-    return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch];
-  });
-}
-function invSelectedIds(){
-  return Object.keys(_invSel).filter(function(id){ return !!_invSel[id]; });
-}
-function invVisibleAllSelected(){
-  return _invVisible.length>0 && _invVisible.every(function(id){ return !!_invSel[id]; });
-}
-function invVisibleSomeSelected(){
-  return _invVisible.some(function(id){ return !!_invSel[id]; });
-}
-function invCategories(){
-  var seen={}, out=[];
-  INV_BASE_CATS.concat((_inv||[]).map(function(item){ return invTrim(item.cat); })).forEach(function(cat){
-    cat=invTrim(cat);
-    if(!cat) return;
-    var key=invNorm(cat);
-    if(seen[key]) return;
-    seen[key]=1;
-    out.push(cat);
-  });
-  out.sort(function(a,b){ return a.localeCompare(b); });
-  return out;
-}
-function invGroups(){
-  var seen={}, out=[];
-  (_inv||[]).forEach(function(item){
-    var grp=invTrim(item.grp);
-    if(!grp) return;
-    var key=invNorm(grp);
-    if(seen[key]) return;
-    seen[key]=1;
-    out.push(grp);
-  });
-  out.sort(function(a,b){ return a.localeCompare(b); });
-  return out;
-}
-function syncInvToolbar(invView, filteredCount, visibleCount){
-  var cardBtn=document.getElementById('inv-view-card');
-  var tableBtn=document.getElementById('inv-view-table');
-  if(cardBtn&&tableBtn){
-    cardBtn.style.background=invView==='card'?'var(--purple)':'var(--card)';
-    cardBtn.style.color=invView==='card'?'#fff':'var(--text)';
-    tableBtn.style.background=invView==='table'?'var(--purple)':'var(--card)';
-    tableBtn.style.color=invView==='table'?'#fff':'var(--text)';
-  }
-  var searchEl=document.getElementById('inv-search');
-  if(searchEl && searchEl.value!==_invQuery) searchEl.value=_invQuery;
-  var sortEl=document.getElementById('inv-sort');
-  if(sortEl) sortEl.value=_invSort;
-
-  var catOptions=invCategories();
-  var catEl=document.getElementById('inv-cat-filter');
-  if(catEl){
-    catEl.innerHTML='<option value="all">All Categories</option>'+catOptions.map(function(cat){
-      return '<option value="'+invEsc(cat)+'">'+invEsc(cat)+'</option>';
-    }).join('');
-    var catValue='all';
-    catOptions.forEach(function(cat){ if(invNorm(cat)===invNorm(_invCatF)) catValue=cat; });
-    _invCatF=catValue;
-    catEl.value=catValue;
-  }
-
-  var groupOptions=invGroups();
-  var groupEl=document.getElementById('inv-group-filter');
-  if(groupEl){
-    groupEl.innerHTML='<option value="all">All Groups</option>'+groupOptions.map(function(group){
-      return '<option value="'+invEsc(group)+'">'+invEsc(group)+'</option>';
-    }).join('');
-    var groupValue='all';
-    groupOptions.forEach(function(group){ if(invNorm(group)===invNorm(_invGroupF)) groupValue=group; });
-    _invGroupF=groupValue;
-    groupEl.value=groupValue;
-  }
-
-  var bulkCatEl=document.getElementById('bulk-inv-cat');
-  if(bulkCatEl){
-    var currentBulkCat=bulkCatEl.value||'';
-    bulkCatEl.innerHTML='<option value="">Keep current</option>'+catOptions.map(function(cat){
-      return '<option value="'+invEsc(cat)+'">'+invEsc(cat)+'</option>';
-    }).join('');
-    if(currentBulkCat){
-      var bulkCatMatch='';
-      catOptions.forEach(function(cat){ if(invNorm(cat)===invNorm(currentBulkCat)) bulkCatMatch=cat; });
-      bulkCatEl.value=bulkCatMatch;
-    } else {
-      bulkCatEl.value='';
-    }
-  }
-
-  var colsEl=document.getElementById('inv-cols-picker');
-  if(colsEl) colsEl.value=localStorage.getItem('inv_cols')||'2';
-  var ppEl=document.getElementById('inv-pp-picker');
-  if(ppEl) ppEl.value=localStorage.getItem('inv_per_page')||'20';
-
-  var selectedCount=invSelectedIds().length;
-  var summaryEl=document.getElementById('inv-selection-summary');
-  if(summaryEl) summaryEl.textContent=selectedCount+' selected';
-  var metaEl=document.getElementById('inv-selection-meta');
-  if(metaEl){
-    if(!_inv.length){
-      metaEl.textContent='Add products to start organizing inventory.';
-    } else if(!filteredCount){
-      metaEl.textContent='No products match the current filters.';
-    } else {
-      var meta=visibleCount+' visible after filters';
-      if(selectedCount) meta+=' | bulk actions apply to '+selectedCount+' selected';
-      else meta+=' | select products to bulk edit, delete, or group them';
-      metaEl.textContent=meta;
-    }
-  }
-
-  var selectVisibleEl=document.getElementById('inv-select-visible');
-  if(selectVisibleEl){
-    selectVisibleEl.disabled=visibleCount===0;
-    selectVisibleEl.checked=invVisibleAllSelected();
-    selectVisibleEl.indeterminate=!selectVisibleEl.checked && invVisibleSomeSelected();
-  }
-
-  ['inv-bulk-edit-btn','inv-bulk-del-btn'].forEach(function(id){
-    var btn=document.getElementById(id);
-    if(btn) btn.disabled=!selectedCount;
-  });
-}
-function fInv(f, el) {
-  _invF = f;
-  document.querySelectorAll('#screen-inventory .sub-tab').forEach(function(t){ t.classList.remove('active'); });
-  var tab=el||document.querySelector('#screen-inventory .sub-tab[data-inv-filter="'+f+'"]');
-  if(tab) tab.classList.add('active');
-  renderInventory();
-}
-function setInvSearch(v){
-  _invQuery=v||'';
-  localStorage.setItem('inv_query',_invQuery);
-  renderInventory();
-}
-function setInvSort(v){
-  _invSort=v||'newest';
-  localStorage.setItem('inv_sort',_invSort);
-  renderInventory();
-}
-function setInvCatFilter(v){
-  _invCatF=v||'all';
-  localStorage.setItem('inv_cat_filter',_invCatF);
-  renderInventory();
-}
-function setInvGroupFilter(v){
-  _invGroupF=v||'all';
-  localStorage.setItem('inv_group_filter',_invGroupF);
-  renderInventory();
-}
-function resetInvFilters(){
-  _invQuery='';
-  _invSort='newest';
-  _invCatF='all';
-  _invGroupF='all';
-  localStorage.setItem('inv_query',_invQuery);
-  localStorage.setItem('inv_sort',_invSort);
-  localStorage.setItem('inv_cat_filter',_invCatF);
-  localStorage.setItem('inv_group_filter',_invGroupF);
-  fInv('all');
-}
-function toggleInvSelection(id, checked){
-  if(checked===false) delete _invSel[id];
-  else _invSel[id]=1;
-  renderInventory();
-}
-function toggleInvSelectVisible(checked){
-  _invVisible.forEach(function(id){
-    if(checked) _invSel[id]=1;
-    else delete _invSel[id];
-  });
-  renderInventory();
-}
-function clearInvSelection(){
-  _invSel={};
-  renderInventory();
-}
-function openInvBulkEdit(){
-  var ids=invSelectedIds();
-  if(!ids.length){ alert('Select at least one product first.'); return; }
-  document.getElementById('bulk-inv-count').textContent=ids.length+' products selected';
-  document.getElementById('bulk-inv-status').value='';
-  document.getElementById('bulk-inv-cat').value='';
-  document.getElementById('bulk-inv-group').value='';
-  document.getElementById('bulk-inv-clear-group').checked=false;
-  document.getElementById('bulk-inv-msg').textContent='';
-  openModal('m-inv-bulk');
-}
-function applyInvBulkEdit(){
-  var ids=invSelectedIds();
-  if(!ids.length) return;
-  if(typeof _loadInv==='function') _loadInv();
-  var newStatus=(document.getElementById('bulk-inv-status')||{}).value||'';
-  var newCategory=(document.getElementById('bulk-inv-cat')||{}).value||'';
-  var newGroup=invTrim((document.getElementById('bulk-inv-group')||{}).value||'');
-  var clearGroup=!!((document.getElementById('bulk-inv-clear-group')||{}).checked);
-  if(!newStatus && !newCategory && !newGroup && !clearGroup){
-    showMsg('bulk-inv-msg','Choose at least one change.','#C62828');
-    return;
-  }
-  var changed=0;
-  _inv.forEach(function(item){
-    if(!_invSel[item.id]) return;
-    if(newStatus){
-      item.st=newStatus;
-      if(newStatus==='sold'){ item.qt=0; item.sd=today(); }
-      if(newStatus!=='sold' && item.qt>0) item.sd=null;
-    }
-    if(newCategory) item.cat=newCategory;
-    if(clearGroup) item.grp='';
-    else if(newGroup) item.grp=newGroup;
-    changed++;
-  });
-  if(typeof _saveInv==='function') _saveInv();
-  showMsg('bulk-inv-msg','Updated '+changed+' products.','#2E7D32');
-  setTimeout(function(){
-    var modal=document.getElementById('m-inv-bulk');
-    if(modal) modal.classList.remove('open');
-    document.getElementById('bulk-inv-msg').textContent='';
-    clearInvSelection();
-  },900);
-}
-function bulkDeleteInvSelected(){
-  var ids=invSelectedIds();
-  if(!ids.length){ alert('Select products to delete.'); return; }
-  if(!confirm('Delete '+ids.length+' selected product(s)?\n\nThis cannot be undone.')) return;
-  if(typeof _loadInv==='function') _loadInv();
-  _inv=_inv.filter(function(item){ return !_invSel[item.id]; });
-  _invSel={};
-  if(typeof _saveInv==='function') _saveInv();
-  renderInventory();
-  showNotif(ids.length+' product(s) deleted');
-}
-function getInvFilteredList(){
-  var list=_inv.slice();
-  if(_invF==='ready') list=list.filter(function(i){ return i.st==='ready'&&i.qt>0; });
-  if(_invF==='wip')   list=list.filter(function(i){ return i.st==='wip'; });
-  if(_invF==='low')   list=list.filter(function(i){ return i.st==='ready'&&i.qt<=2&&i.qt>0; });
-  if(_invF==='sold')  list=list.filter(function(i){ return i.st==='sold'||!!i.sd; });
-  if(_invCatF!=='all') list=list.filter(function(i){ return invNorm(i.cat)===invNorm(_invCatF); });
-  if(_invGroupF!=='all') list=list.filter(function(i){ return invNorm(i.grp)===invNorm(_invGroupF); });
-  if(invTrim(_invQuery)){
-    var q=invNorm(_invQuery);
-    list=list.filter(function(i){
-      var hay=[i.code,i.nm,i.cat,i.fb,i.sz,i.nt,i.grp].join(' ');
-      return invNorm(hay).indexOf(q)!==-1;
-    });
-  }
-  var invDate=function(item){
-    var stamp=Date.parse(item.ad||item.sd||'');
-    return isNaN(stamp)?0:stamp;
-  };
-  list.sort(function(a,b){
-    if(_invSort==='oldest') return invDate(a)-invDate(b);
-    if(_invSort==='name_asc') return invTrim(a.nm).localeCompare(invTrim(b.nm));
-    if(_invSort==='name_desc') return invTrim(b.nm).localeCompare(invTrim(a.nm));
-    if(_invSort==='price_desc') return (parseFloat(b.sl)||0)-(parseFloat(a.sl)||0);
-    if(_invSort==='price_asc') return (parseFloat(a.sl)||0)-(parseFloat(b.sl)||0);
-    if(_invSort==='qty_desc') return (parseInt(b.qt)||0)-(parseInt(a.qt)||0);
-    if(_invSort==='qty_asc') return (parseInt(a.qt)||0)-(parseInt(b.qt)||0);
-    return invDate(b)-invDate(a);
-  });
-  return list;
-}
-function renderInventory() {
-  if(typeof _loadInv==='function') _loadInv();
-  var validSel={};
-  _inv.forEach(function(item){ validSel[item.id]=1; });
-  Object.keys(_invSel).forEach(function(id){ if(!validSel[id]) delete _invSel[id]; });
-
-  var m=monthStr();
-  var nReady=_inv.filter(function(i){return i.st==='ready'&&i.qt>0;}).length;
-  var nWip=_inv.filter(function(i){return i.st==='wip';}).length;
-  var nLow=_inv.filter(function(i){return i.st==='ready'&&i.qt<=2&&i.qt>0;}).length;
-  var nSold=_inv.filter(function(i){return i.sd&&i.sd.indexOf(m)===0;}).length;
-  var se=function(id,v){var e=document.getElementById(id);if(e)e.textContent=v;};
-  se('inv-n-ready',nReady);se('inv-n-wip',nWip);se('inv-n-low',nLow);se('inv-n-sold',nSold);
-
-  var invCols=parseInt(localStorage.getItem('inv_cols')||'2',10);
-  if(!invCols||invCols<1) invCols=2;
-  var invPP=parseInt(localStorage.getItem('inv_per_page')||'20',10);
-  if(!invPP||invPP<1) invPP=20;
-  var invView=localStorage.getItem('inv_view')||'card';
-
-  var filtered=getInvFilteredList();
-  var list=filtered.slice(0,invPP);
-  _invVisible=list.map(function(item){ return item.id; });
-  syncInvToolbar(invView, filtered.length, list.length);
-
-  var el=document.getElementById('inv-list');
-  if(!list.length){
-    el.innerHTML='<div class="empty">'+(_inv.length?'No products match the current filters.':'No products yet. Tap + Add Product!')+'</div>';
-    return;
-  }
-
-  if(invView==='table'){
-    var tbl=document.createElement('div');
-    tbl.style.cssText='overflow-x:auto;';
-    var t=document.createElement('table');
-    t.style.cssText='width:100%;border-collapse:collapse;font-size:12px;';
-    t.innerHTML='<thead><tr style="background:var(--purple);color:#fff;">'
-      +'<th style="padding:8px;text-align:center;width:40px;">Sel</th>'
-      +'<th style="padding:8px;text-align:left;">Code</th>'
-      +'<th style="padding:8px;text-align:left;">Product</th>'
-      +'<th style="padding:8px;text-align:left;">Category</th>'
-      +'<th style="padding:8px;text-align:left;">Group</th>'
-      +'<th style="padding:8px;text-align:center;">Qty</th>'
-      +'<th style="padding:8px;text-align:right;">Price</th>'
-      +'<th style="padding:8px;text-align:center;">Status</th>'
-      +'<th style="padding:8px;text-align:center;">Actions</th>'
-      +'</tr></thead>';
-    var tbody=document.createElement('tbody');
-    list.forEach(function(item){
-      var sl=item.st==='wip'?'WIP':item.qt<=0?'Out':item.qt<=2?'Low':'Active';
-      var sc=item.st==='wip'?'color:var(--blue)':item.qt<=0?'color:var(--red)':item.qt<=2?'color:var(--amber)':'color:var(--green)';
-      var subMeta=[invTrim(item.fb),invTrim(item.sz)].filter(Boolean).join(' / ');
-      var groupLabel=invTrim(item.grp);
-      var tr=document.createElement('tr');
-      tr.style.cssText='border-bottom:.5px solid var(--border);';
-      tr.innerHTML='<td style="padding:7px 8px;text-align:center;"><input class="inv-table-check" type="checkbox" data-select-inv="'+item.id+'" '+(_invSel[item.id]?'checked':'')+'></td>'
-        +'<td style="padding:7px 8px;font-weight:700;color:var(--purple);">'+invEsc(item.code||'-')+'</td>'
-        +'<td style="padding:7px 8px;"><div class="inv-table-name"><span style="font-weight:700;">'+invEsc(item.nm||'')+'</span>'+(subMeta?'<span class="inv-table-sub">'+invEsc(subMeta)+'</span>':'')+'</div></td>'
-        +'<td style="padding:7px 8px;color:var(--muted);">'+invEsc(item.cat||'')+'</td>'
-        +'<td style="padding:7px 8px;">'+(groupLabel?'<span class="inv-group-tag" style="margin-top:0;">'+invEsc(groupLabel)+'</span>':'<span style="font-size:10px;color:var(--muted);">-</span>')+'</td>'
-        +'<td style="padding:7px 8px;text-align:center;">'
-          +'<div style="display:flex;align-items:center;justify-content:center;gap:4px;">'
-          +'<button data-qty-dec="'+item.id+'" style="width:22px;height:22px;border-radius:50%;border:1px solid var(--border);background:var(--bg);cursor:pointer;font-size:14px;font-weight:700;display:flex;align-items:center;justify-content:center;">-</button>'
-          +'<span style="font-weight:700;min-width:20px;text-align:center;">'+item.qt+'</span>'
-          +'<button data-qty-inc="'+item.id+'" style="width:22px;height:22px;border-radius:50%;border:1px solid var(--border);background:var(--bg);cursor:pointer;font-size:14px;font-weight:700;display:flex;align-items:center;justify-content:center;">+</button>'
-          +'</div></td>'
-        +'<td style="padding:7px 8px;text-align:right;font-weight:700;">Rs.'+Math.round(item.sl||0).toLocaleString('en-IN')+'</td>'
-        +'<td style="padding:7px 8px;text-align:center;font-size:11px;font-weight:700;'+sc+'">'+sl+'</td>'
-        +'<td style="padding:7px 8px;text-align:center;">'
-          +'<button data-edit-inv="'+item.id+'" style="background:var(--blue-light);color:var(--blue);border:none;border-radius:5px;padding:3px 8px;font-size:10px;font-weight:700;cursor:pointer;margin-right:3px;">Edit</button>'
-          +(item.st==='ready'&&item.qt>0?'<button data-sell-inv="'+item.id+'" style="background:var(--green-light);color:var(--green);border:none;border-radius:5px;padding:3px 8px;font-size:10px;font-weight:700;cursor:pointer;margin-right:3px;">Sold</button>':'')
-          +(item.st==='wip'?'<button data-ready-inv="'+item.id+'" style="background:var(--purple-light);color:var(--purple);border:none;border-radius:5px;padding:3px 8px;font-size:10px;font-weight:700;cursor:pointer;margin-right:3px;">Ready</button>':'')
-          +'<button data-del-inv="'+item.id+'" style="background:var(--red-light);color:var(--red);border:none;border-radius:5px;padding:3px 8px;font-size:10px;font-weight:700;cursor:pointer;">Del</button>'
-          +'</td>';
-      tbody.appendChild(tr);
-    });
-    t.appendChild(tbody);
-    tbl.appendChild(t);
-    el.innerHTML='';
-    el.appendChild(tbl);
-
-    el.onclick=function(e){
-      var btn=e.target.closest('[data-select-inv],[data-edit-inv],[data-sell-inv],[data-ready-inv],[data-del-inv],[data-qty-inc],[data-qty-dec]');
-      if(!btn) return;
-      if(btn.dataset.selectInv){ toggleInvSelection(btn.dataset.selectInv, !!btn.checked); return; }
-      if(btn.dataset.editInv)  editInvItem(btn.dataset.editInv);
-      if(btn.dataset.sellInv)  markSold(btn.dataset.sellInv);
-      if(btn.dataset.readyInv) markReady(btn.dataset.readyInv);
-      if(btn.dataset.delInv)   deleteInvItem(btn.dataset.delInv);
-      if(btn.dataset.qtyInc){
-        if(typeof _loadInv==='function') _loadInv();
-        var it=_inv.find(function(i){return i.id===btn.dataset.qtyInc;});
-        if(it){it.qt++;if(typeof _saveInv==='function')_saveInv();renderInventory();}
-      }
-      if(btn.dataset.qtyDec){
-        if(typeof _loadInv==='function') _loadInv();
-        var it2=_inv.find(function(i){return i.id===btn.dataset.qtyDec;});
-        if(it2&&it2.qt>0){
-          it2.qt--;
-          if(it2.qt===0){it2.st='sold';it2.sd=today();}
-          if(typeof _saveInv==='function')_saveInv();
-          renderInventory();
-        }
-      }
-    };
-    return;
-  }
-
-  var grid=document.createElement('div');
-  grid.style.cssText='display:grid;grid-template-columns:repeat('+invCols+',1fr);gap:10px;';
-
-  list.forEach(function(item){
-    var card=document.createElement('div');
-    card.className='inv-card'+(_invSel[item.id]?' inv-card-selected':'');
-    var selWrap=document.createElement('label');
-    selWrap.className='inv-card-select';
-    var sel=document.createElement('input');
-    sel.type='checkbox';
-    sel.className='inv-card-check';
-    sel.checked=!!_invSel[item.id];
-    sel.onchange=function(ev){ ev.stopPropagation(); toggleInvSelection(item.id, this.checked); };
-    selWrap.appendChild(sel);
-    card.appendChild(selWrap);
-
-    if(item.ph){
-      var img=document.createElement('img');
-      img.className='inv-img';img.src=item.ph;img.alt='';
-      img.onclick=function(){if(typeof _viewImg==='function')_viewImg(item.ph);};
-      card.appendChild(img);
-    } else {
-      var ph=document.createElement('div');ph.className='inv-ph';ph.textContent='';card.appendChild(ph);
-    }
-    var body=document.createElement('div');body.className='inv-body';
-    var nameDiv=document.createElement('div');nameDiv.className='inv-name';
-    if(item.code){var cb=document.createElement('span');cb.style.cssText='background:var(--purple);color:#fff;border-radius:4px;padding:1px 6px;font-size:10px;margin-right:6px;';cb.textContent=item.code;nameDiv.appendChild(cb);}
-    nameDiv.appendChild(document.createTextNode(item.nm||''));
-    body.appendChild(nameDiv);
-    var subParts=[item.cat||''];
-    if(item.fb) subParts.push(item.fb);
-    if(item.sz) subParts.push(item.sz);
-    var sub=document.createElement('div');sub.className='inv-sub';sub.textContent=subParts.filter(Boolean).join(' / ');body.appendChild(sub);
-    if(item.grp){var grp=document.createElement('div');grp.className='inv-group-tag';grp.textContent=item.grp;body.appendChild(grp);}
-    if(item.nt){var sub2=document.createElement('div');sub2.className='inv-sub';sub2.textContent=item.nt;body.appendChild(sub2);}
-    var foot=document.createElement('div');foot.className='inv-foot';
-    var pd=document.createElement('div');
-    pd.innerHTML='<div class="inv-price">Rs.'+Math.round(item.sl||0).toLocaleString('en-IN')+'</div><div style="font-size:10px;color:var(--muted);">Cost: Rs.'+Math.round(item.cs||0).toLocaleString('en-IN')+'</div>';
-    var rd=document.createElement('div');
-    var sl=item.st==='wip'?'WIP':item.qt<=0?'Out of Stock':item.qt<=2?'Low Stock':'In Stock';
-    var sc=item.st==='wip'?'inv-wip':item.qt<=0?'inv-out':item.qt<=2?'inv-low':'inv-in';
-    var badge=document.createElement('span');badge.className='inv-badge '+sc;badge.textContent=sl+' x'+item.qt;rd.appendChild(badge);
-    var btnDiv=document.createElement('div');btnDiv.style.marginTop='4px';
-    var editBtn=document.createElement('button');editBtn.className='pview-btn';editBtn.style.cssText='background:var(--blue-light);color:var(--blue);';editBtn.textContent='Edit';editBtn.dataset.editInv=item.id;btnDiv.appendChild(editBtn);
-    if(item.st==='ready'&&item.qt>0){var sb=document.createElement('button');sb.className='pview-btn';sb.style.cssText='background:var(--green-light);color:var(--green);';sb.textContent='Mark Sold';sb.dataset.sellInv=item.id;btnDiv.appendChild(sb);}
-    if(item.st==='wip'){var rb=document.createElement('button');rb.className='pview-btn';rb.style.cssText='background:var(--purple-light);color:var(--purple);';rb.textContent='Mark Ready';rb.dataset.readyInv=item.id;btnDiv.appendChild(rb);}
-    var delBtn=document.createElement('button');delBtn.className='pview-btn';delBtn.style.cssText='background:var(--red-light);color:var(--red);';delBtn.textContent='Delete';delBtn.dataset.delInv=item.id;btnDiv.appendChild(delBtn);
-    rd.appendChild(btnDiv);foot.appendChild(pd);foot.appendChild(rd);body.appendChild(foot);card.appendChild(body);grid.appendChild(card);
-  });
-
-  el.innerHTML='';el.appendChild(grid);
-  el.onclick=function(e){
-    var btn=e.target.closest('[data-edit-inv],[data-sell-inv],[data-ready-inv],[data-del-inv]');
-    if(!btn) return;
-    if(btn.dataset.editInv)  editInvItem(btn.dataset.editInv);
-    if(btn.dataset.sellInv)  markSold(btn.dataset.sellInv);
-    if(btn.dataset.readyInv) markReady(btn.dataset.readyInv);
-    if(btn.dataset.delInv)   deleteInvItem(btn.dataset.delInv);
-  };
-}
-function setInvView(v,el){
-  localStorage.setItem('inv_view',v);
-  document.querySelectorAll('#screen-inventory .view-btn').forEach(function(b){
-    b.style.background='var(--card)';b.style.color='var(--text)';
-  });
-  if(el){el.style.background='var(--purple)';el.style.color='#fff';}
-  renderInventory();
-}
-
 function saveInv(){
   var nm = (document.getElementById('inv-nm')||{}).value;
   if(!nm||!nm.trim()){showMsg('inv-msg','Product name required.','#C62828');return;}
@@ -4687,7 +4452,6 @@ function saveInv(){
     cs:parseFloat((document.getElementById('inv-cs')||{}).value)||0,
     sl:parseFloat((document.getElementById('inv-sl')||{}).value)||0,
     qt:parseInt((document.getElementById('inv-qt')||{}).value)||1,
-    grp:((document.getElementById('inv-grp')||{}).value||'').trim(),
     sz:(document.getElementById('inv-sz')||{}).value||'',
     fb:(document.getElementById('inv-fb')||{}).value||'',
     nt:(document.getElementById('inv-nt')||{}).value||'',
@@ -4703,7 +4467,7 @@ function saveInv(){
     try{await syncToSheets('INVENTORY',{productCode:item.code,productName:item.nm,category:item.cat,status:item.st,quantity:item.qt,sellingPrice:item.sl,costPrice:item.cs,sizeColor:item.sz||'',fabric:item.fb||'',addedDate:item.ad,imageUrls:_photoUrl||photo||''});}catch(e){}
   })();
   // Reset form
-  ['inv-nm','inv-cs','inv-sl','inv-qt','inv-sz','inv-nt','inv-code','inv-grp'].forEach(function(id){var e=document.getElementById(id);if(e)e.value='';});
+  ['inv-nm','inv-cs','inv-sl','inv-qt','inv-sz','inv-nt','inv-code'].forEach(function(id){var e=document.getElementById(id);if(e)e.value='';});
   if(typeof _photos!=='undefined'&&_photos.inv) _photos.inv=[];
   var p=document.getElementById('prev-inv'); if(p) p.innerHTML='';
   var l=document.querySelector('#m-inv .photo-box-lbl'); if(l) l.textContent='Tap + to add photos';
@@ -4724,7 +4488,6 @@ function markReady(id) {
   var item = _inv.find(function(i){ return i.id===id; });
   if (!item) return;
   item.st = 'ready';
-  if(item.qt>0) item.sd = null;
   _saveInv(); renderInventory();
 }
 
@@ -4968,7 +4731,6 @@ function importInvCSV(input) {
         cs: parseFloat(obj['cost price'] || obj['cost'] || obj['cs']) || 0,
         sl: parseFloat(obj['selling price'] || obj['price'] || obj['sl']) || 0,
         qt: parseInt(obj['quantity'] || obj['qty'] || obj['qt']) || 1,
-        grp: obj['group'] || obj['collection'] || obj['grp'] || '',
         sz: obj['size/color'] || obj['size'] || obj['sz'] || '',
         fb: obj['fabric'] || obj['fb'] || '',
         nt: obj['notes'] || obj['nt'] || '',
@@ -5088,9 +4850,9 @@ async function syncShopifyProducts() {
 // ===== INVENTORY CSV EXPORT =====
 function exportInvCSV() {
   _loadInv();
-  var rows = [['Product Code','Product Name','Category','Status','Cost Price','Selling Price','Quantity','Group','Size/Color','Fabric','Notes','Added Date']];
+  var rows = [['Product Code','Product Name','Category','Status','Cost Price','Selling Price','Quantity','Size/Color','Fabric','Notes','Added Date']];
   _inv.forEach(function(item) {
-    rows.push([item.code||'', item.nm||'', item.cat||'', item.st||'', item.cs||0, item.sl||0, item.qt||0, item.grp||'', item.sz||'', item.fb||'', item.nt||'', item.ad||'']);
+    rows.push([item.code||'', item.nm||'', item.cat||'', item.st||'', item.cs||0, item.sl||0, item.qt||0, item.sz||'', item.fb||'', item.nt||'', item.ad||'']);
   });
   var csv = rows.map(function(r){ return r.map(function(v){ return '"'+String(v||'').replace(/"/g,'""')+'"'; }).join(','); }).join('\n');
   var a = document.createElement('a');
@@ -5148,7 +4910,7 @@ function showCustDetail(id) {
   if (!c) return;
   _popupCustId = id;
   document.getElementById('popup-cust-name').textContent = c.name;
-  var custOrders = orders.filter(function(o){ return o.custId===id||o.phone===c.phone; });
+  var custOrders = orders.filter(function(o){ return orderBelongsToCustomer(o, c); });
   var html = '';
   var rows = [
     ['Name', c.name],
@@ -5238,24 +5000,22 @@ saveCust = async function() {
   if (window._editCustId) {
     var c = customers.find(function(x){ return x.id===window._editCustId; });
     if (c) {
-      c.name  = document.getElementById('c-name').value.trim();
-      c.phone = document.getElementById('c-phone').value.trim();
-      c.city  = document.getElementById('c-city').value||'Warangal';
-      c.type  = document.getElementById('c-type').value;
-      c.addr  = document.getElementById('c-addr').value;
-      c.notes = document.getElementById('c-notes').value;
-      c.measurements = {
-        shoulder: document.getElementById('m-s').value,
-        bust:     document.getElementById('m-b').value,
-        waist:    document.getElementById('m-w').value,
-        hip:      document.getElementById('m-h').value,
-        sleeve:   document.getElementById('m-sl').value,
-        length:   document.getElementById('m-l').value
-      };
+      var form = getCustomerFormData();
+      if(!form.name||!form.phone){showMsg('cust-msg','Name and phone required.','#C62828');return;}
+      var conflict = findCustomerRecord({phone:form.phone});
+      if(conflict && conflict.id!==c.id){
+        showMsg('cust-msg','This phone already belongs to '+conflict.name+'. Open that customer to edit instead.','#C62828');
+        return;
+      }
+      var previous = { phone: c.phone };
+      applyCustomerData(c, form);
+      syncCustomerReferences(c, previous);
       saveAll();
-      showMsg('cust-msg','Customer updated!','#2E7D32');
+      var warning = await syncCustomerUpsert(c);
+      if(!warning) saveAll();
+      showMsg('cust-msg','Customer updated!'+warning,warning?'#E65100':'#2E7D32');
       window._editCustId = null;
-      setTimeout(function(){ var mCc=document.getElementById('m-customer');if(mCc)mCc.classList.remove('open'); renderCustomers(); document.getElementById('cust-msg').textContent=''; }, 1200);
+      setTimeout(function(){ var mCc=document.getElementById('m-customer');if(mCc)mCc.classList.remove('open'); renderCustomers(); renderOrders(); renderDashboard(); document.getElementById('cust-msg').textContent=''; }, 1200);
       return;
     }
   }
@@ -8179,7 +7939,7 @@ function showCustDetail(id) {
   var _pcid = id;
   window._popupCustId = id;
   var c=customers.find(function(x){return x.id===id;}); if(!c) return;
-  var ordCount=orders.filter(function(o){return o.phone===c.phone;});
+  var ordCount=orders.filter(function(o){return orderBelongsToCustomer(o, c);});
   document.getElementById('popup-cust-name').textContent=c.name;
   var html='<div class="detail-row"><span class="detail-label">Phone</span><span class="detail-val">'+c.phone+'</span></div>'
     +'<div class="detail-row"><span class="detail-label">City</span><span class="detail-val">'+(c.city||'')+'</span></div>'
@@ -8471,7 +8231,7 @@ function editInvItem(id){
   _editInvId=id; _editInvNewPhoto=null;
   var set=function(eid,v){var e=document.getElementById(eid);if(e)e.value=v||'';};
   set('einv-code',item.code); set('einv-nm',item.nm); set('einv-cs',item.cs);
-  set('einv-sl',item.sl); set('einv-qt',item.qt); set('einv-sz',item.sz); set('einv-nt',item.nt); set('einv-grp',item.grp);
+  set('einv-sl',item.sl); set('einv-qt',item.qt); set('einv-sz',item.sz); set('einv-nt',item.nt);
   var setDrop=function(eid,v){var e=document.getElementById(eid);if(!e)return;for(var i=0;i<e.options.length;i++){if(e.options[i].value===v||e.options[i].text===v){e.selectedIndex=i;break;}}};
   setDrop('einv-cat',item.cat); setDrop('einv-st',item.st); setDrop('einv-fb',item.fb);
   var prev=document.getElementById('prev-edit-inv');
@@ -8516,12 +8276,9 @@ function saveInvEdit(){
   item.cs=parseFloat((document.getElementById('einv-cs')||{}).value)||0;
   item.sl=parseFloat((document.getElementById('einv-sl')||{}).value)||0;
   item.qt=parseInt((document.getElementById('einv-qt')||{}).value)||1;
-  item.grp=((document.getElementById('einv-grp')||{}).value||'').trim();
   item.sz=(document.getElementById('einv-sz')||{}).value||'';
   item.fb=(document.getElementById('einv-fb')||{}).value||'';
   item.nt=(document.getElementById('einv-nt')||{}).value||'';
-  if(item.st==='sold'){item.qt=0;item.sd=today();}
-  else if(item.qt>0){item.sd=null;}
   if(_editInvNewPhoto) item.ph=_editInvNewPhoto;
   if(typeof _saveInv==='function') _saveInv();
   showMsg('einv-msg','Saved!','#2E7D32');
@@ -8603,7 +8360,7 @@ openModal=function(id){
   if(id==='m-inv'){
     if(typeof _photos!=='undefined') _photos.inv=[];
     var _pi=document.getElementById('prev-inv');if(_pi)_pi.innerHTML='';
-    ['inv-nm','inv-code','inv-cs','inv-sl','inv-sz','inv-nt','inv-grp'].forEach(function(x){var e=document.getElementById(x);if(e)e.value='';});
+    ['inv-nm','inv-code','inv-cs','inv-sl','inv-sz','inv-nt'].forEach(function(x){var e=document.getElementById(x);if(e)e.value='';});
     var _iq2=document.getElementById('inv-qt');if(_iq2)_iq2.value='1';
     setTimeout(function(){ _initPhotoInputs(); },100);
   }
@@ -8656,7 +8413,7 @@ function deleteOrder(id) {
 function deleteCustConfirm(id) {
   var c = customers.find(function(x){ return x.id===id; });
   if(!c) return;
-  var hasOrders = orders.filter(function(o){ return o.custId===id||o.phone===c.phone; }).length;
+  var hasOrders = orders.filter(function(o){ return orderBelongsToCustomer(o, c); }).length;
   var msg = 'Delete customer: ' + c.name + '?';
   if(hasOrders) msg += '\n\nWarning: This customer has ' + hasOrders + ' order(s).';
   msg += '\n\nThis cannot be undone.';
@@ -8674,7 +8431,6 @@ function deleteInvItem(id) {
   if(!item) return;
   if(!confirm('Delete product: ' + item.nm + '?\n\nThis cannot be undone.')) return;
   _inv = _inv.filter(function(i){ return i.id!==id; });
-  if(typeof _invSel!=='undefined') delete _invSel[id];
   if(typeof _saveInv==='function') _saveInv();
   if(typeof editInvItem!=='undefined') document.getElementById('m-edit-inv').classList.remove('open');
   renderInventory();
@@ -8753,6 +8509,8 @@ function _initPhotoInputs() {
   _setupPhoto('inp-exp', 'prev-exp', 'exp');
   _setupPhoto('inp-inv', 'prev-inv', 'inv');
 }
+
+
 
 </script>
 
@@ -8875,3 +8633,4 @@ function _initPhotoInputs() {
 
 </body>
 </html>
+
